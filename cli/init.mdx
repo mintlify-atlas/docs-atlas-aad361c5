@@ -1,0 +1,67 @@
+---
+title: '`flue init` — scaffold project config'
+description: 'flue init scaffolds a flue.config.ts in your project directory with the correct build target set — node or cloudflare — and ready to extend.'
+---
+
+`flue init` writes a minimal `flue.config.ts` to a target directory. Run it once when setting up a new Flue project, or when you want to add an explicit config to an existing project.
+
+## Usage
+
+```bash
+flue init --target <node|cloudflare> [--root <path>] [--force]
+```
+
+## Flags
+
+<ParamField path="--target" type="string" required>
+  Build target. Accepted values: `node` or `cloudflare`. This value is written directly into the generated config file as `target: '...'`.
+</ParamField>
+
+<ParamField path="--root" type="string" default="cwd">
+  Directory where `flue.config.ts` will be written. Defaults to the current working directory.
+</ParamField>
+
+<ParamField path="--force" type="boolean" default="false">
+  Overwrite an existing `flue.config.*` file. Without this flag, `flue init` exits with an error if any `flue.config.*` variant already exists in the target directory.
+</ParamField>
+
+## Output
+
+`flue init` writes a single file — `flue.config.ts` — to the target directory:
+
+```ts
+import { defineConfig } from '@flue/cli/config';
+
+export default defineConfig({
+  target: 'node', // or 'cloudflare'
+});
+```
+
+After writing the file, it prints the next step:
+
+```
+Next step:
+
+  fetch https://flueframework.com/start.md to create a new agent
+```
+
+## Existing config files
+
+If a `flue.config.*` file already exists in the target directory (in any supported extension — `.ts`, `.mts`, `.mjs`, `.js`, `.cjs`, `.cts`), `flue init` will refuse to overwrite it unless `--force` is passed.
+
+<Warning>
+  If you run `flue init --force` and the existing config uses a different extension (e.g. `flue.config.mjs`), the new `flue.config.ts` will take precedence over the old file — but the old file stays on disk. `flue init` will warn you and print its path so you can delete it manually.
+</Warning>
+
+## Examples
+
+```bash
+# Scaffold a Node.js config in the current directory
+flue init --target node
+
+# Scaffold a Cloudflare config in a subdirectory
+flue init --target cloudflare --root ./my-agent
+
+# Overwrite an existing config
+flue init --target node --force
+```

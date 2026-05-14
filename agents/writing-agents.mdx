@@ -1,0 +1,196 @@
+---
+title: "Writing Flue agents"
+description: "Learn how to write Flue agent files: file locations, required exports, the handler signature, FlueContext fields, and structured logging."
+---
+
+A Flue agent is a TypeScript file that exports a `triggers` object and a default handler function. The file's name becomes the agent's name, and its location depends on which project layout you use.
+
+## Project layouts
+
+Flue supports two source layouts. If a `.flue/` directory exists at the project root, Flue uses it exclusively. Otherwise it falls back to bare top-level directories. The two layouts never mix.
+
+<Tabs>
+  <Tab title=".flue/ layout">
+    ```
+    my-project/
+    ├── .flue/
+    │   ├── agents/
+    │   │   └── hello.ts       ← your agent
+    │   └── roles/
+    │       └── greeter.md
+    ├── .agents/
+    │   └── skills/
+    │       └── greet/
+    │           └── SKILL.md
+    └── AGENTS.md
+    ```
+
+    Use this layout when Flue is the primary purpose of your project root. The `.flue/` directory acts like a `src/` folder.
+  </Tab>
+  <Tab title="Bare layout">
+    ```
+    my-project/
+    ├── agents/
+    │   └── hello.ts           ← your agent
+    ├── roles/
+    │   └── greeter.md
+    ├── .agents/
+    │   └── skills/
+    │       └── greet/
+    │           └── SKILL.md
+    └── AGENTS.md
+    ```
+
+    Use this layout when agents live alongside other project files without a dedicated `.flue/` directory.
+  </Tab>
+</Tabs>
+
+## Agent file structure
+
+Every agent file must export two things: a `triggers` object and a default async handler function.
+
+```typescript
+// .flue/agents/hello.ts
+import type { FlueContext } from '@flue/runtime';
+import * as v from 'valibot';
+
+// Required: declares how this agent is invoked
+export const triggers = { webhook: true };
+
+// Required: the handler where your agent logic lives
+export default async function ({ init, payload, log }: FlueContext) {
+  const harness = await init({ model: 'anthropic/claude-sonnet-4-6' });
+  const session = await harness.session();
+
+  const { data } = await session.prompt(
+    `Translate this to ${payload.language}: "${payload.text}"`,
+    {
+      result: v.object({
+        translation: v.string(),
+        confidence: v.picklist(['low', 'medium', 'high']),
+      }),
+    },
+  );
+
+  log.info('translation complete', { language: payload.language });
+  return data;
+}
+```
+
+## Triggers
+
+The `triggers` export controls how the agent is invoked.
+
+### `{ webhook: true }` — HTTP endpoint
+
+Exposes the agent as an HTTP endpoint at:
+
+```
+POST /agents/<name>/<id>
+```
+
+The `<name>` segment comes from the file name. The `<id>` segment identifies the agent instance — one customer, repo, conversation space, or other caller-defined boundary. Reuse the same `<id>` to continue an existing instance; use a new one to start fresh.
+
+```typescript
+export const triggers = { webhook: true };
+```
+
+```bash
+# Invoke the agent
+curl http://localhost:3583/agents/hello/session-abc \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hello world", "language": "French"}'
+```
+
+### `{}` — CI-only agent
+
+An agent with an empty triggers object has no HTTP endpoint. It can only be invoked from the command line:
+
+```typescript
+export const triggers = {};
+```
+
+```bash
+flue run triage --target node --id run-1 --payload '{"issueNumber": 42}'
+```
+
+This is the right choice for agents that run in CI pipelines triggered by GitHub Actions, GitLab CI/CD, or other automation.
+
+## The handler function
+
+The default export receives a `FlueContext` object. You can destructure the fields you need:
+
+```typescript
+export default async function ({
+  init,
+  payload,
+  env,
+  req,
+  log,
+  id,
+  runId,
+}: FlueContext) {
+  // ...
+}
+```
+
+### `FlueContext` fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `init` | `(options: AgentInit) => Promise<FlueHarness>` | Initializes a harness with sandbox, tools, and model defaults. |
+| `id` | `string` | Agent instance id from the URL `<id>` segment. Stable across runs for the same instance. |
+| `runId` | `string` | Server-minted id for this single HTTP invocation. |
+| `payload` | `TPayload` | Parsed JSON body from the request. Type with a generic: `FlueContext<MyPayload>`. |
+| `env` | `TEnv` | Platform environment bindings. `process.env` on Node, Worker `env` on Cloudflare. |
+| `req` | `Request \| undefined` | The standard Fetch `Request`. Use for reading headers, verifying HMAC signatures, etc. |
+| `log` | `FlueLogger` | Structured logger — emits events visible in the run event stream. |
+
+You can type `payload` and `env` using generic parameters:
+
+```typescript
+interface MyPayload {
+  text: string;
+  language: string;
+}
+
+interface MyEnv {
+  ANTHROPIC_API_KEY: string;
+}
+
+export default async function ({ init, payload, env }: FlueContext<MyPayload, MyEnv>) {
+  // payload.text and env.ANTHROPIC_API_KEY are typed
+}
+```
+
+## Structured logging
+
+Use `log` to emit structured events that appear in the run's event stream. Unlike `console.log`, log events carry typed attributes and a severity level.
+
+```typescript
+log.info('translation complete', { language: 'French', tokens: 120 });
+log.warn('confidence low', { score: 0.4 });
+log.error('third-party API failed', { statusCode: 503 });
+```
+
+All three methods share the same signature:
+
+```typescript
+log.info(message: string, attributes?: Record<string, unknown>): void
+log.warn(message: string, attributes?: Record<string, unknown>): void
+log.error(message: string, attributes?: Record<string, unknown>): void
+```
+
+## Return value
+
+Whatever you return from the handler becomes the HTTP response body (serialized as JSON for webhook agents). Return structured data directly, or let the harness response flow through:
+
+```typescript
+// Return typed structured data
+const { data } = await session.prompt('...', { result: MySchema });
+return data;
+
+// Return the raw text response
+const response = await session.prompt('...');
+return { reply: response.text };
+```

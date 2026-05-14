@@ -1,0 +1,386 @@
+---
+title: "Flue core concepts: agents, harnesses, sessions"
+description: "A conceptual overview of Flue's object hierarchy — Agent, AgentInstance, Run, Harness, Session, Operation, and Turn — and how they compose."
+---
+
+Flue structures every agent run around a strict hierarchy of objects. Understanding what each object represents, who owns it, and how long it lives is the fastest way to reason about state, persistence, and isolation in your agents.
+
+## The hierarchy at a glance
+
+```
+Agent (definition)              — .flue/agents/<name>.ts; named by its file
+└─ AgentInstance                — URL <id> segment; the durable runtime boundary
+   └─ Run                       — one HTTP invocation; has a server-minted runId
+      └─ Harness                — one init() call; configures model, sandbox, tools
+         └─ Session             — message history + metadata within a harness
+            └─ Operation        — one prompt() / skill() / task() / shell() call
+               └─ Turn          — one LLM round-trip inside an operation
+```
+
+Each level is nested inside the one above it. State flows downward — a session is scoped to a harness, a harness is scoped to an instance, and so on.
+
+---
+
+## Agent
+
+An **agent** is a TypeScript file in `.flue/agents/`. Its filename determines its name: `hello.ts` → agent `hello`, reachable at `POST /agents/hello/<id>`.
+
+Every agent file exports two things:
+
+- **`triggers`** — an object that tells Flue how to invoke the agent. `{ webhook: true }` exposes the agent as an HTTP endpoint. An empty `{}` means the agent can only be invoked from the CLI via `flue run`.
+- **A default export handler** — an `async function` that receives a [`FlueContext`](/api/flue-context) and returns a result.
+
+```typescript
+// .flue/agents/hello.ts
+import type { FlueContext } from '@flue/runtime';
+
+export const triggers = { webhook: true };
+
+export default async function ({ init, payload, env, id, runId }: FlueContext) {
+  // Your orchestration logic goes here.
+}
+```
+
+Source files live in `.flue/agents/` when a `.flue/` directory exists at the project root. If there is no `.flue/` directory, Flue falls back to `agents/` at the root. The two layouts never mix.
+
+<Info>
+  Agents have names (derived from the filename). Agent instances have ids (from the URL). Harnesses and sessions have names. Runs and operations have server-minted ids.
+</Info>
+
+---
+
+## AgentInstance
+
+An **AgentInstance** is identified by the `<id>` segment in the request URL:
+
+```
+POST /agents/<agent-name>/<id>
+```
+
+The `<id>` is caller-defined. It is exposed to your handler as `ctx.id`. Think of the instance as a durable workspace — it is the scope for:
+
+- **Sandbox state**: files written to the filesystem during a run persist to the same instance's sandbox (for remote sandboxes; virtual sandboxes are in-memory per run unless you share the filesystem object in a closure).
+- **Session history**: conversations (message history) are stored and retrieved by instance id + session name.
+
+**When to use the same `<id>`:** you want to continue an existing conversation or pick up where a previous run left off. The model sees the full prior message history.
+
+**When to use a new `<id>`:** you want a completely fresh conversation — a new customer, a new repository, a new isolated thread.
+
+```bash
+# Start a conversation
+curl http://localhost:3583/agents/hello/customer-abc \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Hello"}'
+
+# Continue that conversation (same id)
+curl http://localhost:3583/agents/hello/customer-abc \
+  -H "Content-Type: application/json" \
+  -d '{"message": "What did I just say?"}'
+
+# Start a separate conversation (new id)
+curl http://localhost:3583/agents/hello/customer-xyz \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Hello"}'
+```
+
+In production, generate a stable, unique `<id>` for each distinct conversation space — a customer id, a repository name, a ticket number, or any other boundary that makes sense for your domain.
+
+---
+
+## Run
+
+A **Run** is one HTTP invocation of an agent. It is created by the server when a request arrives and destroyed when the handler returns. Every run gets a server-minted `runId` exposed as `ctx.runId`.
+
+Runs are short-lived. They are not directly durable — persistence happens at the session level (via the session store) and the sandbox level (via the remote sandbox provider).
+
+---
+
+## Harness
+
+A **Harness** is the object returned by `init()`. It is the central configuration handle for a run: it holds the default model, sandbox, tool list, and session registry.
+
+```typescript
+const harness = await init({
+  model: 'anthropic/claude-sonnet-4-6',
+});
+```
+
+`init()` accepts an [`AgentInit`](/api/agent-init) options object. Key fields:
+
+| Field | Description |
+|---|---|
+| `model` | Default model for all sessions in this harness. Format: `'provider/model-id'`. |
+| `sandbox` | Sandbox type: omit for virtual (default), `local()` for host access, or a remote connector. |
+| `tools` | Harness-wide tools available to every `prompt()`, `skill()`, and `task()` call. |
+| `role` | Harness-wide default role. Overridden by session-level or per-call roles. |
+| `name` | Harness name. Defaults to `"default"`. |
+| `cwd` | Working directory for context discovery and shell calls. |
+
+One run can have multiple harnesses. Call `init({ name: 'project' })` a second time to get a second, independently-configured harness — useful when you want two isolated contexts (e.g., a setup harness and a project harness) that share the same sandbox:
+
+```typescript
+// .flue/agents/code.ts
+const setupHarness = await init({ sandbox: daytona(sandbox), model: 'openai/gpt-5.5' });
+const setup = await setupHarness.session();
+await setup.shell('git clone https://github.com/org/repo /workspace/project');
+
+// Second harness, same sandbox, different cwd and context discovery root
+const projectHarness = await init({
+  name: 'project',
+  sandbox: daytona(sandbox),
+  cwd: '/workspace/project',
+  model: 'openai/gpt-5.5',
+});
+const session = await projectHarness.session();
+```
+
+---
+
+## Session
+
+A **Session** is the message history and conversation metadata for one conversation thread inside a harness. The default session is named `"default"`. Open a named session with `harness.session(threadName)`:
+
+```typescript
+const session = await harness.session();               // "default" session
+const reviewThread = await harness.session('review'); // named session
+```
+
+Sessions persist message history across runs. On Cloudflare, session data is backed by Durable Objects SQLite and survives indefinitely. On Node.js, sessions are stored in memory by default — supply a custom `SessionStore` to `init({ persist })` for durable persistence.
+
+**Session operations:**
+- `session.prompt(text, options?)` — send a user message and wait for the model's response.
+- `session.skill(name, options?)` — invoke a named skill (a Markdown instruction file) within the session.
+- `session.task(text, options?)` — run a one-shot child agent in a detached session with its own message history.
+- `session.shell(command, options?)` — run a shell command in the sandbox, recorded in the conversation transcript.
+- `session.compact()` — trigger context compaction immediately (summarizes older messages to free context window space).
+
+Use `harness.sessions.get()`, `.create()`, and `.delete()` for explicit session lifecycle management.
+
+---
+
+## Operation
+
+An **Operation** is one `session.prompt()`, `session.skill()`, `session.task()`, or `session.shell()` call. Each operation gets a server-minted `operationId`. Operations emit events on the run's SSE stream (e.g. `operation_start`, `operation`).
+
+Operations return a `CallHandle<T>` — a `PromiseLike` that you can `await` directly, or cancel by calling `.abort()`.
+
+### Typed results
+
+Pass a Valibot schema as `result:` to get schema-validated, fully-typed data back from any LLM operation:
+
+```typescript
+import * as v from 'valibot';
+
+const { data } = await session.prompt(
+  'Triage this issue and return a structured result.',
+  {
+    result: v.object({
+      severity: v.picklist(['low', 'medium', 'high', 'critical']),
+      reproducible: v.boolean(),
+      summary: v.string(),
+    }),
+  },
+);
+
+console.log(data.severity); // typed as 'low' | 'medium' | 'high' | 'critical'
+```
+
+### Tasks
+
+`session.task()` runs a focused, one-shot child agent in a detached session. Tasks share the same sandbox and filesystem as the parent, but get their own message history and discover `AGENTS.md` and skills from their own working directory:
+
+```typescript
+const research = await session.task('Research the auth flow and summarize key files.', {
+  cwd: '/workspace/project',
+  role: 'researcher',
+});
+
+const plan = await session.prompt(
+  `Use this research to draft an implementation plan:\n\n${research.text}`,
+);
+```
+
+---
+
+## Turn
+
+A **Turn** is one LLM round-trip inside an operation. An operation may produce multiple turns if the model calls tools — each tool call + response is a turn. Turns emit `turn` events on the SSE stream with duration, model id, token usage, and stop reason.
+
+---
+
+## Sandboxes
+
+Every harness has a sandbox — the environment where shell commands run and files are read and written. Flue supports three sandbox modes:
+
+<AccordionGroup>
+
+<Accordion title="Virtual sandbox (default)">
+
+The default sandbox is a fast, in-process virtual environment powered by [just-bash](https://github.com/vercel-labs/just-bash). It has no real filesystem or network access unless you opt in, but the agent can use grep, glob, read, write, and other built-in tools against an in-memory filesystem.
+
+Use the virtual sandbox for high-traffic agents that don't need a real shell. It starts instantly, costs nothing to spin up, and scales to any request volume.
+
+```typescript
+// Virtual sandbox — the default; no sandbox option needed.
+const harness = await init({ model: 'anthropic/claude-sonnet-4-6' });
+```
+
+To share an in-memory filesystem across sessions (so files written in one prompt are visible in the next), create the filesystem object outside `init()` and share it in a closure:
+
+```typescript
+import { Bash, InMemoryFs } from 'just-bash';
+
+const fs = new InMemoryFs();
+
+const harness = await init({
+  sandbox: () => new Bash({ fs, cwd: '/workspace' }),
+  model: 'anthropic/claude-sonnet-4-6',
+});
+```
+
+</Accordion>
+
+<Accordion title="Local sandbox (Node.js only)">
+
+`local()` gives the agent direct access to the host filesystem and shell. The agent's bash tool can run `gh`, `git`, `npm`, and any other binary on `$PATH`. Use this in CI runners where the runner itself is your isolation boundary.
+
+```typescript
+import { local } from '@flue/runtime/node';
+
+const harness = await init({
+  sandbox: local({
+    env: { GH_TOKEN: process.env.GH_TOKEN },
+  }),
+  model: 'anthropic/claude-opus-4-7',
+});
+```
+
+Only a small allowlist of shell-essential env vars (`PATH`, `HOME`, locale vars) is inherited from `process.env` by default. Explicitly pass any additional env vars you need.
+
+<Warning>
+  `local()` is only available on the Node.js target. Using it with `--target cloudflare` throws an error at runtime.
+</Warning>
+
+</Accordion>
+
+<Accordion title="Remote sandbox (Daytona, E2B, Cloudflare Containers)">
+
+For full coding agents, you want a real Linux environment with persistent storage. Remote connectors adapt third-party sandbox providers into Flue's `SandboxFactory` interface.
+
+Install a connector with `flue add`:
+
+```bash
+flue add daytona | claude
+flue add daytona | opencode
+```
+
+The CLI fetches the connector's installation instructions and pipes them to your coding agent, which writes a small TypeScript adapter into `.flue/connectors/<name>.ts`. You then import the adapter directly:
+
+```typescript
+import { daytona } from '../connectors/daytona';
+import { Daytona } from '@daytona/sdk';
+
+const client = new Daytona({ apiKey: env.DAYTONA_API_KEY });
+const sandbox = await client.create();
+
+const harness = await init({
+  sandbox: daytona(sandbox),
+  model: 'openai/gpt-5.5',
+});
+```
+
+Connectors are available for Daytona, E2B, and Cloudflare Containers. You can also build a custom connector from a provider's docs URL:
+
+```bash
+flue add https://e2b.dev --category sandbox | claude
+```
+
+</Accordion>
+
+</AccordionGroup>
+
+---
+
+## Roles and skills
+
+**Roles** are Markdown files in `.flue/roles/` that define a persona for the agent: instructions, a preferred model, and an optional reasoning effort level. Apply a role at the harness, session, or call level. Per-call roles override session roles, which override harness roles:
+
+```typescript
+const harness = await init({ model: 'anthropic/claude-sonnet-4-6', role: 'coder' });
+const session = await harness.session('review-thread', { role: 'reviewer' });
+
+await session.prompt('Review the latest changes.');          // uses reviewer
+await session.task('Research related issues.', { role: 'researcher' }); // uses researcher
+```
+
+**Skills** are Markdown files in `.flue/skills/` that describe a procedure the agent should follow. Invoke a skill by name or path:
+
+```typescript
+const { data } = await session.skill('triage', {
+  args: { issueNumber: payload.issueNumber },
+  result: v.object({
+    severity: v.picklist(['low', 'medium', 'high', 'critical']),
+    reproducible: v.boolean(),
+    summary: v.string(),
+  }),
+});
+```
+
+The skill body (everything below the frontmatter) is read from disk at call time, not cached in memory. This means you can edit skill files mid-session without reinitializing the agent.
+
+---
+
+## Session persistence
+
+<Tabs>
+
+<Tab title="Cloudflare (Durable Objects)">
+
+When you deploy with `--target cloudflare`, Flue automatically backs every session with a Durable Object. Session data is stored in SQLite inside the DO and survives indefinitely across requests, process restarts, and deployments.
+
+No configuration is required. The session store is wired up automatically by the generated Cloudflare entry point.
+
+</Tab>
+
+<Tab title="Node.js (in-memory)">
+
+On Node.js, sessions are stored in memory by default. They persist across requests within the same process lifetime, but are lost on restart.
+
+For durable persistence on Node.js, supply a custom `SessionStore` to `init()`:
+
+```typescript
+const harness = await init({
+  model: 'anthropic/claude-sonnet-4-6',
+  persist: myCustomStore, // implements SessionStore
+});
+```
+
+A `SessionStore` must implement `save(id, data)`, `load(id)`, and `delete(id)`. Back it with any database, key-value store, or object storage.
+
+</Tab>
+
+</Tabs>
+
+---
+
+## Multi-target deployment
+
+Flue agents are runtime-agnostic. The same agent file builds to different targets without any code changes:
+
+```bash
+flue build --target node        # single bundled .mjs, run anywhere Node.js is available
+flue build --target cloudflare  # Cloudflare Workers + Durable Objects
+```
+
+For development:
+
+```bash
+flue dev --target node          # Node.js watch server on port 3583
+flue dev --target cloudflare    # Cloudflare Workers via wrangler (requires wrangler peer dep)
+```
+
+<Tip>
+  What works in `flue dev` works in production — dev and build go through the same bundler pipeline, so there are no environment-specific surprises at deploy time.
+</Tip>
+
+The only runtime-specific APIs are sandbox imports (`@flue/runtime/node` for `local()`, `@flue/runtime/cloudflare` for `getVirtualSandbox()`) and Cloudflare-specific bindings like `env.AI` for Workers AI. Everything else — `init()`, `harness.session()`, `session.prompt()`, `connectMcpServer()` — is identical across targets.

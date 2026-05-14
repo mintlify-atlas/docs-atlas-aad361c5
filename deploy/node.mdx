@@ -1,0 +1,294 @@
+---
+title: 'Deploy Flue agents to Node.js'
+description: 'Build Flue agents into a single Node.js server bundle and deploy to any host — Docker, Railway, Fly.io, a VPS, or your own infrastructure.'
+---
+
+Build and deploy Flue agents as a self-contained Node.js server. The Node.js target suits long-running servers, self-hosted deployments, and any platform that can run Node — a VPS, Docker, Railway, Fly.io, or a cloud VM.
+
+By the end of this guide you will have a working agent running locally, and you will know how to build and deploy it anywhere.
+
+## When to use the Node.js target
+
+- You need a long-running HTTP server (not a serverless function)
+- You want to self-host on your own infrastructure
+- You need `local()` sandbox access to the host filesystem and shell
+- You are deploying to a platform that runs Node.js (Railway, Render, Fly.io, etc.)
+
+For ephemeral CI runs that don't need an HTTP endpoint at all, see [GitHub Actions](/deploy/github-actions) or [GitLab CI/CD](/deploy/gitlab-ci).
+
+## Project setup
+
+<Steps>
+  <Step title="Create the project">
+    ```bash
+    mkdir my-flue-server && cd my-flue-server
+    npm init -y
+    npm install @flue/runtime valibot
+    npm install -D @flue/cli
+    ```
+  </Step>
+
+  <Step title="Add a flue.config.ts">
+    Setting `target: 'node'` in the config means you can run `flue build` and `flue dev` without passing `--target` every time.
+
+    ```typescript
+    // flue.config.ts
+    import { defineConfig } from '@flue/cli/config';
+
+    export default defineConfig({
+      target: 'node',
+    });
+    ```
+
+    CLI flags always override config values. The config is loaded via Node's native TypeScript support (Node 22+).
+  </Step>
+
+  <Step title="Create your first agent">
+    Source files live in `.flue/agents/` (or `agents/` at the project root if you prefer the bare layout — the two never mix).
+
+    ```typescript
+    // .flue/agents/translate.ts
+    import type { FlueContext } from '@flue/runtime';
+    import * as v from 'valibot';
+
+    export const triggers = { webhook: true };
+
+    export default async function ({ init, payload }: FlueContext) {
+      const harness = await init({ model: 'anthropic/claude-sonnet-4-6' });
+      const session = await harness.session();
+
+      const { data } = await session.prompt(
+        `Translate this to ${payload.language}: "${payload.text}"`,
+        {
+          result: v.object({
+            translation: v.string(),
+            confidence: v.picklist(['low', 'medium', 'high']),
+          }),
+        },
+      );
+
+      return data;
+    }
+    ```
+
+    `triggers = { webhook: true }` tells Flue to expose this agent as an HTTP endpoint. The route is `POST /agents/translate/:id`.
+  </Step>
+
+  <Step title="Add your API key">
+    ```bash
+    cat > .env <<'EOF'
+    ANTHROPIC_API_KEY="your-api-key"
+    EOF
+
+    printf '\n.env\n' >> .gitignore
+    ```
+
+    Use the variable name your model provider expects — `ANTHROPIC_API_KEY` for Anthropic, `OPENAI_API_KEY` for OpenAI, and so on. Do not commit `.env`.
+  </Step>
+
+  <Step title="Start the dev server">
+    ```bash
+    npx flue dev --target node --env .env
+    ```
+
+    The dev server builds your project, loads the env file, starts on port 3583, and reloads on file changes. Override the port with `--port`.
+
+    Test it:
+
+    ```bash
+    curl http://localhost:3583/agents/translate/test-1 \
+      -H "Content-Type: application/json" \
+      -d '{"text": "Hello world", "language": "French"}'
+    ```
+
+    The response streams back as SSE and resolves to JSON.
+  </Step>
+</Steps>
+
+## Agent HTTP routes
+
+Every agent with `triggers = { webhook: true }` gets an HTTP endpoint automatically:
+
+```
+POST /agents/<name>/<id>
+```
+
+The `<name>` segment comes from the filename (`translate.ts` → `translate`). The `<id>` segment identifies the agent instance — reuse the same ID to continue a session, use a new one to start fresh.
+
+The server also exposes:
+
+- `GET /health` — health check
+- `GET /agents` — lists all agents and their triggers
+
+## Environment variables
+
+Pass `--env <path>` to load a `.env`-format file:
+
+```bash
+flue dev --target node --env .env
+flue dev --target node --env .env --env .env.local
+```
+
+The flag is repeatable. Later files override earlier ones on key collision. Shell-set environment variables always win over file values. The same flag works for `flue run`.
+
+The built server (`node dist/server.mjs`) reads `process.env` directly — source your env file before starting, or pass values explicitly:
+
+```bash
+set -a; source .env; set +a
+node dist/server.mjs
+```
+
+The built server listens on the port from the `PORT` environment variable, defaulting to 3000.
+
+## Production build
+
+```bash
+npx flue build --target node
+```
+
+`flue build --target node` compiles your project into a single bundled `./dist/server.mjs`. Your project's `node_modules` are still needed at runtime — the build externalizes your dependencies rather than bundling them.
+
+Run it:
+
+```bash
+node dist/server.mjs
+
+# Custom port
+PORT=8080 node dist/server.mjs
+```
+
+## One-shot invocation with flue run
+
+`flue run` is useful for testing an agent without leaving a server running:
+
+```bash
+npx flue run translate --target node --id test-1 --env .env \
+  --payload '{"text": "Hello world", "language": "French"}'
+```
+
+It builds the project, starts a temporary server, invokes the agent via SSE, streams progress to stderr, prints the final result as JSON to stdout, and exits. The same pattern is used in CI.
+
+## Sessions
+
+On Node.js, session state is stored in memory by default — sessions persist for the lifetime of the process but are lost on restart. For a stateless agent this is fine.
+
+For durable sessions, pass a custom store via `persist` on `init()`. A store implements three methods — `save()`, `load()`, and `delete()` — each operating on a session ID:
+
+```typescript
+import type { FlueContext, SessionStore, SessionData } from '@flue/runtime';
+
+const store: SessionStore = {
+  async save(id: string, data: SessionData) { /* write to DB */ },
+  async load(id: string) { /* read from DB, return null if not found */ },
+  async delete(id: string) { /* delete from DB */ },
+};
+
+export default async function ({ init }: FlueContext) {
+  const harness = await init({
+    persist: store,
+    model: 'anthropic/claude-sonnet-4-6',
+  });
+  const session = await harness.session();
+  // ...
+}
+```
+
+Back this with any database: SQLite, Postgres, Redis, etc.
+
+## Custom app entry
+
+For custom middleware, provider configuration, or additional routes, create `.flue/app.ts`:
+
+```typescript
+// .flue/app.ts
+import { configureProvider, flue } from '@flue/runtime/app';
+
+export default {
+  fetch(req, env, ctx) {
+    configureProvider('anthropic', {
+      baseUrl: env.ANTHROPIC_BASE_URL,
+      apiKey: env.ANTHROPIC_API_KEY,
+    });
+
+    return flue().fetch(req, env, ctx);
+  },
+};
+```
+
+`flue()` returns a Hono sub-app with all agent routes mounted. You can wrap it in additional middleware or add custom routes alongside it.
+
+## Sandbox options
+
+The Node.js target supports three sandbox strategies:
+
+**Virtual sandbox (default)** — fast, no container, good for prompt-and-response agents:
+
+```typescript
+const harness = await init({ model: 'anthropic/claude-sonnet-4-6' });
+```
+
+**Local sandbox** — direct host filesystem and shell access:
+
+```typescript
+import { local } from '@flue/runtime/node';
+
+const harness = await init({
+  sandbox: local({
+    // Expose specific host env vars to the agent's shell.
+    // API keys not listed here stay invisible to the model's bash tool.
+    env: { GH_TOKEN: process.env.GH_TOKEN },
+  }),
+  model: 'anthropic/claude-sonnet-4-6',
+});
+```
+
+Use `local()` when the host environment already provides isolation — a CI runner, a container, a dedicated VM. Skills and `AGENTS.md` are discovered automatically from `process.cwd()`.
+
+**Remote sandbox** — fully isolated Linux environment via a connector:
+
+```typescript
+import { Daytona } from '@daytona/sdk';
+import { daytona } from './connectors/daytona';
+
+const client = new Daytona({ apiKey: env.DAYTONA_API_KEY });
+const sandbox = await client.create();
+
+const harness = await init({
+  sandbox: daytona(sandbox),
+  model: 'anthropic/claude-sonnet-4-6',
+});
+```
+
+Install connectors with `flue add daytona | claude` (or `| opencode`, `| codex`, etc.). See the [Daytona connector](/connectors/daytona) for a full walkthrough.
+
+## Deploying
+
+The build output is a standard Node.js server. It runs anywhere.
+
+### Docker
+
+```dockerfile
+FROM node:22-slim
+WORKDIR /app
+# The build externalizes dependencies, so node_modules are needed at runtime.
+COPY package.json package-lock.json ./
+RUN npm ci --production
+COPY dist/ ./dist/
+ENV PORT=8080
+EXPOSE 8080
+CMD ["node", "dist/server.mjs"]
+```
+
+```bash
+docker build -t my-flue-server .
+docker run -p 8080:8080 -e ANTHROPIC_API_KEY=sk-... my-flue-server
+```
+
+### Other platforms
+
+| Platform | Command |
+| --- | --- |
+| Railway / Render | Set start command to `node dist/server.mjs` |
+| Fly.io | Use the Dockerfile above with `fly launch` |
+| PM2 | `pm2 start dist/server.mjs` |
+| AWS / GCP / Azure | Deploy as a container or directly on a VM |

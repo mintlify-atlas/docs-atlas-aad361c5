@@ -1,0 +1,228 @@
+---
+title: "Harnesses, sessions, and tasks in Flue"
+description: "Understand how init(), FlueHarness, and FlueSession work together, and when to use prompt(), task(), shell(), and fs for agent orchestration."
+---
+
+Inside an agent handler, `init()` creates a **harness** — a configured handle for model defaults, tools, sandbox, and sessions. From the harness you open sessions. From sessions you send prompts, run tasks, and execute shell commands.
+
+## Terminology
+
+```
+Harness  — one init({ name }) call; defaults to "default"
+└─ Session — one harness.session(name?); defaults to "default"
+   └─ Operation — one session.prompt / skill / task / shell call
+      └─ Turn — one LLM round-trip
+```
+
+## `init(AgentInit)` — create a harness
+
+```typescript
+const harness = await init({
+  model: 'anthropic/claude-sonnet-4-6',
+});
+```
+
+All options for `AgentInit`:
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `model` | `string \| false` | **Required.** Default model for all calls in this harness. Format: `'provider/model-id'`. Pass `false` to require every call to supply its own model via a role or call-site override. |
+| `name` | `string` | Harness name. Defaults to `"default"`. Use a different name when one run needs multiple isolated harness scopes. |
+| `cwd` | `string` | Working directory for context discovery (`AGENTS.md`, `.agents/skills/`), tool defaults, and shell calls. Defaults to the sandbox's own `cwd`. |
+| `sandbox` | `false \| SandboxFactory \| BashFactory` | Sandbox to use. Omit or pass `false` for the default in-memory virtual sandbox. See [Sandboxes](/agents/sandboxes). |
+| `role` | `string` | Harness-wide default role. Overridden by session-level or per-call roles. |
+| `thinkingLevel` | `'off' \| 'low' \| 'medium' \| 'high'` | Default reasoning effort. Precedence: call > role > harness. Defaults to `'medium'` when nothing is set. |
+| `tools` | `ToolDef[]` | Harness-wide custom tools. Available to every session call. |
+| `compaction` | `false \| CompactionConfig` | Context window compaction. Omit for model-aware defaults. Pass `false` to disable automatic threshold compaction. |
+
+### Multiple harnesses in one run
+
+Pass a unique `name` when one agent run needs multiple isolated harness scopes — for example, a setup phase and a project phase that share the same sandbox but discover different `AGENTS.md` contexts:
+
+```typescript
+// .flue/agents/code.ts
+import { type FlueContext } from '@flue/runtime';
+import { Daytona } from '@daytona/sdk';
+import { daytona } from '../connectors/daytona';
+
+export const triggers = { webhook: true };
+
+export default async function ({ init, payload, env }: FlueContext) {
+  const client = new Daytona({ apiKey: env.DAYTONA_API_KEY });
+  const sandbox = await client.create();
+
+  // Setup harness: clone and install
+  const setupHarness = await init({
+    sandbox: daytona(sandbox),
+    model: 'openai/gpt-5.5',
+  });
+  const setup = await setupHarness.session();
+  await setup.shell(`git clone ${payload.repo} /workspace/project`);
+  await setup.shell('npm install', { cwd: '/workspace/project' });
+
+  // Project harness: discovers AGENTS.md from the cloned repo
+  const projectHarness = await init({
+    name: 'project',
+    sandbox: daytona(sandbox),
+    cwd: '/workspace/project',
+    model: 'openai/gpt-5.5',
+  });
+  const session = await projectHarness.session();
+  return await session.prompt(payload.prompt);
+}
+```
+
+## `harness.session(name?, options?)` — open a session
+
+```typescript
+const session = await harness.session();              // default session
+const session = await harness.session('thread-2');    // named session
+const session = await harness.session('review', { role: 'reviewer' });
+```
+
+Sessions persist message history. Reuse the same agent instance `id` (the URL segment) to continue a conversation. Open multiple named sessions within one harness for parallel conversation branches.
+
+### Explicit session management
+
+`harness.sessions` gives you lower-level control:
+
+```typescript
+// Load an existing session (throws if missing)
+const session = await harness.sessions.get('thread-2');
+
+// Create a new session (throws if it already exists)
+const session = await harness.sessions.create('thread-3');
+
+// Delete a session's stored state
+await harness.sessions.delete('old-thread');
+```
+
+## `session.prompt(text, options?)` — send a message
+
+`prompt()` sends a user message and returns when the model completes its response, including any tool calls.
+
+```typescript
+// Plain text response
+const { text } = await session.prompt('Summarize the changes in this PR.');
+
+// Typed structured output
+const { data } = await session.prompt('Analyze this issue.', {
+  result: v.object({
+    severity: v.picklist(['low', 'medium', 'high', 'critical']),
+    summary: v.string(),
+  }),
+});
+```
+
+### `prompt()` options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `result` | `valibot schema` | Parse and validate the model's response as structured JSON. Returns `{ data }`. |
+| `role` | `string` | Override the role for this call only. |
+| `model` | `string` | Override the model for this call only. |
+| `thinkingLevel` | `ThinkingLevel` | Override reasoning effort for this call. |
+| `tools` | `ToolDef[]` | Additional tools scoped to this call only. |
+| `images` | `PromptImage[]` | Inline images attached to the user message. Requires a vision-capable model. |
+| `signal` | `AbortSignal` | Cancel this call. |
+
+## `session.task(text, options?)` — run a focused child agent
+
+`task()` opens a detached child session with its own message history. Tasks share the same sandbox and filesystem, but discover their own `AGENTS.md` and `.agents/skills/` from their working directory.
+
+```typescript
+const session = await harness.session();
+
+const research = await session.task(
+  'Research the auth flow and summarize the key files.',
+  {
+    cwd: '/workspace/project',
+    role: 'researcher',
+  },
+);
+
+const answer = await session.prompt(
+  `Use this research to draft the implementation plan:\n\n${research.text}`,
+);
+```
+
+<Note>
+The LLM can also call the `task` tool autonomously during `prompt()` and `skill()` calls. You don't need to call `session.task()` explicitly — the model decides when to delegate parallel research or exploration work on its own.
+</Note>
+
+### When to use `task()` vs a new `session.prompt()`
+
+Use `task()` when you want a focused, one-shot result with its own clean context. Use `session.prompt()` when you want to continue the same conversation and have the model build on prior turns.
+
+## `session.shell()` vs `harness.shell()`
+
+Both run shell commands in the sandbox. The key difference is whether the command appears in the conversation history.
+
+<Note>
+Use `session.shell()` when the command output should be visible to the model in subsequent turns. Use `harness.shell()` for setup work (cloning repos, installing deps) that the model doesn't need to reason about.
+</Note>
+
+```typescript
+// Recorded in conversation — model sees the output in its next turn
+const result = await session.shell('git diff HEAD~1');
+
+// NOT recorded — plumbing work the model doesn't need to see
+await harness.shell('npm install', { cwd: '/workspace/project' });
+```
+
+Both return `{ stdout, stderr, exitCode }`.
+
+Shell options:
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `cwd` | `string` | Working directory for this command. |
+| `env` | `Record<string, string>` | Extra environment variables. |
+| `signal` | `AbortSignal` | Cancel this command. |
+
+## `session.fs` / `harness.fs` — out-of-band file operations
+
+`FlueFs` lets you read and write files in the sandbox without recording anything in the conversation. Use it for staging files, capturing artifacts, and managing scratch space that the model shouldn't see.
+
+```typescript
+// Stage a file before the model reads it
+await harness.fs.writeFile('/workspace/context.md', contextContent);
+
+// Capture an artifact the model produced
+const output = await session.fs.readFile('/workspace/report.md');
+```
+
+If a write should feed into the model's next turn, prompt the model to read the file itself rather than using `fs`.
+
+`FlueFs` methods:
+
+| Method | Description |
+|--------|-------------|
+| `readFile(path)` | Read a UTF-8 file. |
+| `readFileBuffer(path)` | Read a file as raw bytes. |
+| `writeFile(path, content)` | Write content to a file, creating it if needed. |
+| `stat(path)` | Get file metadata (`size`, `mtime`, type flags). |
+| `readdir(path)` | List directory entries (names only). |
+| `exists(path)` | Check if a path exists. Never throws. |
+| `mkdir(path, options?)` | Create a directory. Pass `{ recursive: true }` for `mkdir -p` semantics. |
+| `rm(path, options?)` | Remove a file or directory. Pass `{ recursive: true, force: true }` for `rm -rf` semantics. |
+
+## Role and model precedence
+
+Roles and models can be set at multiple levels. The most specific setting always wins.
+
+```
+call role > session role > harness role
+call model > role model > harness model
+```
+
+```typescript
+const harness = await init({ model: 'anthropic/claude-sonnet-4-6', role: 'coder' });
+const session = await harness.session('review-thread', { role: 'reviewer' });
+
+await session.prompt('Review the latest changes.');         // uses reviewer
+await session.task('Research related issues.', { role: 'researcher' }); // uses researcher
+await session.prompt('Echo back: hello', { role: 'auditor' }); // uses auditor
+```
+
+Role instructions are applied as call-scoped system prompt overlays. They are not injected into the persisted message history.

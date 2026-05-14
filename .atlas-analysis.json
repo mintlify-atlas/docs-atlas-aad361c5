@@ -1,0 +1,128 @@
+{
+  "projectType": "framework",
+  "projectName": "Flue",
+  "projectDescription": "A runtime-agnostic TypeScript framework for building headless, programmable AI agents with built-in sandbox execution, session persistence, and multi-target deployment (Node.js, Cloudflare Workers, CI/CD).",
+  "theme": "luma",
+  "primaryColor": "#0766fc",
+  "lightColor": "#7cb4fc",
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "concepts"
+            ]
+          },
+          {
+            "group": "Agents",
+            "pages": [
+              "agents/writing-agents",
+              "agents/harness-and-sessions",
+              "agents/skills-and-roles",
+              "agents/tools-and-mcp",
+              "agents/sandboxes"
+            ]
+          },
+          {
+            "group": "Connectors",
+            "pages": [
+              "connectors/overview",
+              "connectors/daytona",
+              "connectors/e2b",
+              "connectors/cloudflare",
+              "connectors/custom"
+            ]
+          },
+          {
+            "group": "Deploy",
+            "pages": [
+              "deploy/node",
+              "deploy/cloudflare",
+              "deploy/github-actions",
+              "deploy/gitlab-ci"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/flue-config",
+              "configuration/providers",
+              "configuration/compaction"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "CLI Reference",
+        "groups": [
+          {
+            "group": "Commands",
+            "pages": [
+              "cli/overview",
+              "cli/dev",
+              "cli/run",
+              "cli/build",
+              "cli/init",
+              "cli/add",
+              "cli/logs"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Runtime",
+            "pages": [
+              "api/flue-context",
+              "api/agent-init",
+              "api/flue-harness",
+              "api/flue-session",
+              "api/sandbox-factory"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Agent harness framework — write agents like Claude Code, but 100% headless and programmable",
+    "Virtual sandbox (just-bash) for fast, cheap, stateless agents with no container overhead",
+    "Remote sandbox connectors for full Linux environments (Daytona, E2B, Cloudflare Containers)",
+    "Persistent sessions backed by Durable Objects on Cloudflare or in-memory on Node.js",
+    "Skills and Roles — reusable Markdown instruction sets that shape agent behavior",
+    "MCP (Model Context Protocol) tool adapter for connecting to remote MCP servers",
+    "Multi-target builds: Node.js server, Cloudflare Workers, GitHub Actions, GitLab CI",
+    "Structured typed results from prompt/skill/task calls via Valibot schemas",
+    "Automatic context compaction for long-running sessions approaching token limits",
+    "CLI with dev, run, build, init, add, and logs commands"
+  ],
+  "publicApiSurface": [
+    "FlueContext — agent handler context (init, payload, env, req, log, id, runId)",
+    "init(AgentInit) → Promise<FlueHarness> — initialize harness with model, sandbox, tools",
+    "FlueHarness.session(name?, options?) → Promise<FlueSession>",
+    "FlueSession.prompt(text, options?) → CallHandle<PromptResponse>",
+    "FlueSession.skill(name, options?) → CallHandle<PromptResponse>",
+    "FlueSession.task(text, options?) → CallHandle<PromptResponse>",
+    "FlueSession.shell(command, options?) → CallHandle<ShellResult>",
+    "FlueSession.compact() → Promise<void>",
+    "FlueSession.fs — FlueFs (readFile, writeFile, stat, readdir, exists, mkdir, rm)",
+    "connectMcpServer(name, options) → Promise<McpServerConnection>",
+    "createTools() — create typed tool definitions",
+    "Type — JSON Schema builder (re-export from pi-ai)",
+    "SandboxFactory / SandboxApi — connector interface for custom sandbox providers",
+    "@flue/runtime/app: flue(), configureProvider(), registerProvider(), observe()",
+    "@flue/runtime/cloudflare: getVirtualSandbox(r2Bucket)",
+    "@flue/runtime/node: local(options?) — host-bound Node.js sandbox",
+    "flue dev / flue run / flue build / flue init / flue add / flue logs — CLI commands",
+    "triggers = { webhook: true } — HTTP endpoint trigger declaration",
+    "defineConfig({ target, root, output }) — flue.config.ts helper"
+  ]
+}

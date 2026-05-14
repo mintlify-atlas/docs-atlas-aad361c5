@@ -1,0 +1,127 @@
+---
+title: '`flue run` — one-shot agent invocation'
+description: 'Build your project and invoke a single agent once in a production-style Node.js process. Ideal for CI pipelines and scripted agent calls.'
+---
+
+`flue run` is a one-shot command that builds your project, starts a temporary server, invokes a named agent once via SSE, streams the event output to stderr, prints the final result JSON to stdout, and shuts down. It is the primary command for CI pipelines, shell scripts, and any automated invocation.
+
+## Usage
+
+```bash
+flue run <agent> [--target node] --id <id> [--payload <json>] [--root <path>] [--output <path>] [--config <path>] [--port <number>] [--env <path>]...
+```
+
+## Flags
+
+<ParamField path="agent" type="string" required>
+  Name of the agent to invoke. Corresponds to the filename in `agents/` without its extension (e.g. `hello` for `agents/hello.ts`).
+</ParamField>
+
+<ParamField path="--id" type="string" required>
+  Agent instance ID. Used to scope session state. Must be unique per logical agent instance (e.g. a customer ID, repo slug, or test run identifier).
+</ParamField>
+
+<ParamField path="--target" type="string" default="node">
+  Build target. Only `node` is supported by `flue run`. To test a Cloudflare-targeted agent locally, use `flue dev --target cloudflare` instead.
+</ParamField>
+
+<ParamField path="--payload" type="string" default="{}">
+  JSON string to pass as the agent's `payload`. Must be valid JSON. Defaults to an empty object.
+
+  ```bash
+  flue run hello --target node --id test-1 --payload '{"name": "World"}'
+  ```
+</ParamField>
+
+<ParamField path="--root" type="string" default="cwd">
+  Project root directory. Defaults to the current working directory.
+</ParamField>
+
+<ParamField path="--output" type="string" default="<root>/dist">
+  Where build artifacts are written. Defaults to `<root>/dist`.
+</ParamField>
+
+<ParamField path="--config" type="string">
+  Explicit path to a `flue.config.{ts,mts,mjs,js,cjs,cts}` file (relative to cwd). Defaults to auto-discovery from the root directory.
+</ParamField>
+
+<ParamField path="--port" type="number">
+  Port for the temporary server. If not set, an available port is chosen automatically.
+</ParamField>
+
+<ParamField path="--env" type="string">
+  Path to a `.env`-format file. Repeatable; later files override earlier ones on key collision. Shell-set environment variables win over file values.
+
+  ```bash
+  flue run hello --target node --id test-1 --env .env
+  ```
+</ParamField>
+
+## How it works
+
+`flue run` performs four steps in sequence:
+
+<Steps>
+  <Step title="Build">
+    Compiles the project to `<output>/server.mjs` using the Node build plugin.
+  </Step>
+  <Step title="Start server">
+    Spawns a temporary Node.js child process running `server.mjs` on the selected port.
+  </Step>
+  <Step title="Invoke agent">
+    POSTs `<payload>` to `http://localhost:<port>/agents/<agent>/<id>` and consumes the SSE event stream. Tool calls, text output, and thinking blocks are streamed to **stderr** as they arrive.
+  </Step>
+  <Step title="Output and exit">
+    On `run_end`, the final `result` JSON is printed to **stdout** and the server is shut down.
+  </Step>
+</Steps>
+
+## Output
+
+| Stream | Content |
+|--------|---------|
+| `stderr` | Event stream: tool calls, text deltas, thinking, log messages, errors |
+| `stdout` | Final `result` JSON from the agent (pretty-printed, one object) |
+
+This split lets you pipe the result to other tools while keeping the event stream visible in your terminal:
+
+```bash
+flue run hello --target node --id test-1 | jq '.translation'
+```
+
+The run ID is printed to stderr as `[flue] Run ID: <id>` — use it with `flue logs` to replay events later.
+
+## Cloudflare limitation
+
+<Warning>
+  `flue run --target cloudflare` is not supported. `flue run` is a Node.js invoker and cannot start a Cloudflare Workers runtime.
+
+  To test a Cloudflare-targeted agent locally, use `flue dev`:
+
+  ```bash
+  flue dev --target cloudflare
+
+  # In another terminal:
+  curl http://localhost:3583/agents/<agent>/<id> \
+    -H "Content-Type: application/json" \
+    -d '{}'
+  ```
+</Warning>
+
+If your `flue.config.ts` sets `target: 'cloudflare'`, `flue run` will also refuse to start and print the same hint.
+
+## Examples
+
+```bash
+# Minimal invocation
+flue run hello --target node --id test-1
+
+# With a JSON payload
+flue run hello --target node --id test-1 --payload '{"name": "World"}'
+
+# Load environment variables
+flue run hello --target node --id test-1 --payload '{"name": "World"}' --env .env
+
+# Pipe the result to jq
+flue run hello --target node --id test-1 | jq .
+```

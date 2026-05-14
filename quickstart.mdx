@@ -1,81 +1,208 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
-icon: 'rocket'
+title: "Get started with Flue"
+description: "Install Flue, write your first agent, start the dev server, and invoke it over HTTP — from zero to a running agent in under five minutes."
 ---
 
-## Get started in three steps
+This guide walks you through installing Flue, creating a minimal agent, running the dev server, and invoking your agent via `curl`. By the end you'll have a working agent and a mental model for how Flue's build and deploy cycle works.
 
-Get your documentation site running locally and make your first customization.
+<Note>
+  Flue requires **Node.js ≥ 22.18**. Check your version with `node --version`.
+</Note>
 
-### Step 1: Set up your local environment
+<Steps>
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+<Step title="Install packages">
 
-### Step 2: Deploy your changes
+Install the Flue runtime and CLI, plus [Valibot](https://valibot.dev) for schema-validated results:
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+```bash
+npm install @flue/runtime valibot
+npm install -D @flue/cli
+```
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+`@flue/runtime` is your agent's production dependency. `@flue/cli` provides the `flue` binary for development, builds, and deployment. Valibot is used to define typed result schemas for `prompt()`, `skill()`, and `task()` calls.
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+</Step>
 
-### Step 3: Go live
+<Step title="Initialize the project">
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+Run `flue init` to create a `flue.config.ts` at the project root:
+
+```bash
+npx flue init --target node
+```
+
+This writes the following config file:
+
+```typescript
+// flue.config.ts
+import { defineConfig } from '@flue/cli/config';
+
+export default defineConfig({
+  target: 'node',
+});
+```
+
+The `target` field sets the default build and dev target. You can override it with `--target` on any CLI command. CLI flags always take precedence over the config file.
+
+</Step>
+
+<Step title="Set your API key">
+
+Flue routes model calls through the provider identified in the `model` string. For Anthropic models, set `ANTHROPIC_API_KEY` in a `.env` file:
+
+```bash
+# .env
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+<Tip>
+  During development, pass `--env .env` to `flue dev` or `flue run` and Flue loads the file automatically. Later files on `--env` override earlier ones. Shell-set env vars always win.
+</Tip>
+
+</Step>
+
+<Step title="Create your first agent">
+
+Create the directory `.flue/agents/` and add a file named `hello.ts`:
+
+```bash
+mkdir -p .flue/agents
+```
+
+```typescript
+// .flue/agents/hello.ts
+import type { FlueContext } from '@flue/runtime';
+import * as v from 'valibot';
+
+// Every agent needs at least one trigger.
+// webhook: true makes this agent reachable via HTTP.
+export const triggers = { webhook: true };
+
+export default async function ({ init, log }: FlueContext) {
+  // init() creates the harness: the configured handle for model,
+  // sandbox, tools, and sessions.
+  const harness = await init({ model: 'anthropic/claude-sonnet-4-6' });
+  const session = await harness.session();
+
+  // prompt() sends a message and waits for the agent to respond.
+  // Pass `result:` with a Valibot schema to get typed, validated data back.
+  const response = await session.prompt('What is 2 + 2? Return only the number.', {
+    result: v.object({ answer: v.number() }),
+  });
+
+  log.info('solved arithmetic prompt', {
+    answer: response.data.answer,
+    tokens: response.usage.totalTokens,
+    model: response.model.id,
+  });
+
+  return response.data;
+}
+```
+
+The filename determines the agent's name: `hello.ts` → agent `hello`. The `triggers` export tells Flue how to invoke this agent; `webhook: true` exposes it as an HTTP endpoint.
+
+</Step>
+
+<Step title="Start the dev server">
+
+```bash
+npx flue dev --target node --env .env
+```
+
+Flue builds your agents and starts a watch-mode server. Edit any agent file and the server rebuilds and reloads automatically.
+
+<Note>
+  The dev server listens on port **3583** by default — that's "FLUE" on a phone keypad. Override with `--port`.
+</Note>
+
+You'll see output like:
+
+```
+  ▲ Flue dev server
+  → http://localhost:3583
+  → watching .flue/agents/
+```
+
+</Step>
+
+<Step title="Invoke your agent via HTTP">
+
+With the dev server running, invoke the `hello` agent in a separate terminal:
+
+```bash
+curl http://localhost:3583/agents/hello/session-1 \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+The URL pattern is `POST /agents/<agent-name>/<id>`. The `<id>` segment (`session-1` here) identifies the **agent instance** — reuse the same id to continue a conversation, or use a new id to start fresh.
+
+</Step>
+
+<Step title="View the streamed output">
+
+Flue streams agent events as Server-Sent Events. The final line in the response contains the run result:
+
+```json
+data: {"type":"run_end","result":{"answer":4},"isError":false,"durationMs":1234}
+```
+
+Your `session.prompt()` call returned `{ answer: 4 }` — the schema-validated result from the model.
+
+To continue the same conversation, POST to the same instance id again:
+
+```bash
+# Continue the same conversation
+curl http://localhost:3583/agents/hello/session-1 \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+# Start a fresh conversation
+curl http://localhost:3583/agents/hello/session-2 \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+</Step>
+
+</Steps>
+
+## Run in CI with `flue run`
+
+For one-shot, scripted invocations (CI pipelines, cron jobs, local testing without a running server), use `flue run`. It builds the project, starts a temporary server, invokes the agent, streams output to stderr, prints the result to stdout, then shuts down:
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-... npx flue run hello \
+  --target node \
+  --id test-1 \
+  --env .env
+```
+
+Pass `--payload` for agents that read from `ctx.payload`:
+
+```bash
+npx flue run hello \
+  --target node \
+  --id test-1 \
+  --payload '{"text": "Hello world", "language": "French"}' \
+  --env .env
+```
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Core concepts" icon="book" href="/concepts">
+    Learn the full agent → harness → session → operation hierarchy.
+  </Card>
+  <Card title="Writing agents" icon="pen-to-square" href="/agents/writing-agents">
+    Triggers, handler patterns, payload types, and the `FlueContext` API.
+  </Card>
+  <Card title="Skills and roles" icon="graduation-cap" href="/agents/skills-and-roles">
+    Shape agent behavior with reusable Markdown instruction files.
+  </Card>
+  <Card title="Deploy to Node.js" icon="server" href="/deploy/node">
+    Build a production artifact and deploy your agents to any Node.js host.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

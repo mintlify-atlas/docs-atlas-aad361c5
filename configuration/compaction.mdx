@@ -1,0 +1,137 @@
+---
+title: 'Context compaction for long-running sessions'
+description: 'Automatically summarize older messages when context approaches the model window limit, keeping sessions alive indefinitely without losing continuity.'
+---
+
+Context compaction keeps sessions alive when a conversation's message history approaches a model's context window limit. Instead of failing or truncating the conversation, Flue summarizes older messages into a structured checkpoint and replaces them — the session continues with recent history intact and a compact summary of what came before.
+
+<Note>
+Compaction is automatic and on by default. You only need to configure it if you want to tune the trigger threshold, adjust how much recent history is preserved verbatim, or use a different model for summarization.
+</Note>
+
+## How it works
+
+Flue monitors estimated token usage after each assistant turn. When used tokens exceed `contextWindow - reserveTokens`, compaction fires before the next prompt:
+
+1. A cut point is identified so that `keepRecentTokens` worth of recent messages are preserved verbatim.
+2. Older messages are serialized and sent to the summarization model.
+3. The summary replaces the compacted messages in the session's stored history.
+4. The session continues — the next prompt sees the summary plus the preserved tail.
+
+By default, compaction triggers at roughly **96% full** on a 200k-token window (e.g. Claude Sonnet), matching the behavior of Claude Code and OpenCode.
+
+There are three trigger modes:
+
+- **Threshold** — automatic, fires when estimated tokens exceed the threshold. Compact, then continue.
+- **Overflow** — fires when the LLM itself returns a context overflow error. Compact, then auto-retry the failed turn.
+- **Manual** — triggered explicitly via `session.compact()`.
+
+## Configuring compaction
+
+Pass `compaction` to `init()`:
+
+```typescript
+const harness = await init({
+  model: 'anthropic/claude-sonnet-4-6',
+  compaction: {
+    reserveTokens: 30000,
+    keepRecentTokens: 12000,
+    model: 'anthropic/claude-haiku-4-5',
+  },
+});
+```
+
+### Options
+
+<ParamField path="reserveTokens" type="number" default="min(20000, model.maxTokens)">
+  Token headroom to reserve in the context window. Compaction fires when:
+
+  ```
+  estimatedTokens > contextWindow - reserveTokens
+  ```
+
+  Defaults to `min(20000, model.maxTokens)` — capped at the model's maximum output because reserving more than the model can emit in one turn wastes usable context. On a 200k window with a 20k output limit, this triggers near 96% full.
+
+  Increase this value to compact earlier and leave more room for long assistant responses. Decrease it to use more of the context window before compacting.
+</ParamField>
+
+<ParamField path="keepRecentTokens" type="number" default="8000">
+  How many tokens of recent message history to preserve verbatim after compaction. Older messages are folded into the summary; this tail is kept so the model retains immediate context — current file paths, tool results, and active focus.
+
+  Lower values compact more aggressively at the cost of recent-context fidelity. Setting this above ~10% of the model's context window is rarely useful.
+</ParamField>
+
+<ParamField path="model" type="string">
+  Override the model used for summarization. Defaults to the session's active model.
+
+  Use this to reduce cost (a cheap summarizer on an expensive session model) or improve quality (a long-context model when the session model has a short context window). Format: `'provider/model-id'`.
+
+  ```typescript
+  compaction: {
+    model: 'anthropic/claude-haiku-4-5', // cheap summarizer
+  }
+  ```
+</ParamField>
+
+## Disabling automatic compaction
+
+Pass `compaction: false` to disable the threshold trigger. Overflow recovery and `session.compact()` still run — only automatic threshold-based compaction is turned off.
+
+```typescript
+const harness = await init({
+  model: 'anthropic/claude-sonnet-4-6',
+  compaction: false,
+});
+```
+
+## Manual compaction
+
+Call `session.compact()` to trigger compaction on-demand — useful for surfacing a `/compact` command in agent UIs without waiting for the context window to fill:
+
+```typescript
+const session = await harness.session();
+
+// Trigger compaction immediately, e.g. in response to a user command.
+await session.compact();
+```
+
+`session.compact()` throws if another operation (`prompt`, `skill`, `task`, or `shell`) is in-flight on that session — start a separate session for parallel branches. It resolves as a no-op when there is nothing to compact.
+
+## Events
+
+Compaction emits two events you can observe via the run event stream:
+
+**`compaction_start`** — fires before summarization begins:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `reason` | `'threshold' \| 'overflow' \| 'manual'` | What triggered compaction |
+| `estimatedTokens` | `number` | Estimated token count at trigger time |
+
+**`compaction`** — fires after summarization completes:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `messagesBefore` | `number` | Message count before compaction |
+| `messagesAfter` | `number` | Message count after compaction |
+| `durationMs` | `number` | Time taken for the summarization call(s) |
+| `usage` | `PromptUsage` | Token usage from the summarization call(s) |
+
+## Usage cost
+
+Summarization LLM calls are tracked the same as regular calls. Token usage is recorded in `PromptUsage` format and attributed to the operation that triggered compaction. If compaction fires during a `prompt()` call (threshold or overflow), its cost is included in that operation's `usage` response.
+
+## `CompactionEntry` in session data
+
+Each compaction is recorded as a `CompactionEntry` in the session's stored `SessionData.entries`:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `type` | `'compaction'` | Entry type discriminator |
+| `summary` | `string` | The generated summary text |
+| `firstKeptEntryId` | `string` | ID of the first message entry kept verbatim |
+| `tokensBefore` | `number` | Estimated token count before compaction |
+| `details` | `object` | `readFiles` and `modifiedFiles` extracted from compacted turns |
+| `usage` | `PromptUsage` | Token usage from the summarization call(s) |
+
+This entry is appended to the session's persistent history, so compaction survives across requests on both Node (in-memory store) and Cloudflare (Durable Objects SQLite).

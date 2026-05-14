@@ -1,0 +1,251 @@
+---
+title: "FlueSession — prompt, skill, task, shell"
+description: "FlueSession manages message history and conversation state. Use prompt(), skill(), task(), shell(), and compact() to drive agent interactions within a session."
+---
+
+`FlueSession` is the conversation thread within a harness. It holds message history and exposes the core methods for driving agent interactions: `prompt()`, `skill()`, `task()`, `shell()`, and `compact()`. Obtain a session via `harness.session()`.
+
+## Properties
+
+<ResponseField name="name" type="string">
+  The session name. Defaults to `"default"`.
+</ResponseField>
+
+<ResponseField name="fs" type="FlueFs">
+  Out-of-band filesystem access — same interface as `harness.fs`. Operations do not appear in the conversation transcript. See [FlueHarness](/api/flue-harness) for the full `FlueFs` method table.
+</ResponseField>
+
+## `prompt(text, options?)`
+
+Send a user message and get a response. The LLM takes one or more turns (calling tools, thinking, producing text) before returning.
+
+```typescript
+// Plain text response
+const response = await session.prompt('Summarize the codebase in 3 bullet points.');
+console.log(response.text);
+
+// Typed structured result
+import * as v from 'valibot';
+const { data } = await session.prompt('What is 2 + 2?', {
+  result: v.object({ answer: v.number() }),
+});
+console.log(data.answer); // 4
+```
+
+<ParamField path="text" type="string" required>
+  The user message to send.
+</ParamField>
+
+<ParamField path="options.result" type="Valibot schema">
+  Schema for structured output. When provided, the response includes a typed `data` field and the return type becomes `PromptResultResponse<T>`.
+</ParamField>
+
+<ParamField path="options.role" type="string">
+  Call-scoped role override. Overrides session and harness roles.
+</ParamField>
+
+<ParamField path="options.model" type="string">
+  Call-scoped model override (`'provider/model-id'`). Overrides role and harness model.
+</ParamField>
+
+<ParamField path="options.thinkingLevel" type="'off' | 'low' | 'medium' | 'high'">
+  Reasoning effort for this call. Overrides role and harness `thinkingLevel`.
+</ParamField>
+
+<ParamField path="options.tools" type="ToolDef[]">
+  Additional call-scoped tools. Names must not conflict with built-in or harness tools.
+</ParamField>
+
+<ParamField path="options.images" type="PromptImage[]">
+  Images to attach to the user message. Requires a vision-capable model. Each image is `{ type: 'image', data: base64string, mimeType: string }`.
+</ParamField>
+
+<ParamField path="options.signal" type="AbortSignal">
+  Cancel this call. Rejects with `AbortError`.
+</ParamField>
+
+Returns `CallHandle<PromptResponse>` or `CallHandle<PromptResultResponse<T>>` when `result` is provided.
+
+## `skill(name, options?)`
+
+Invoke a reusable skill defined as a Markdown file in `.agents/skills/`. The model reads the skill file from disk at call time — editable mid-session without re-initializing.
+
+```typescript
+// Reference by frontmatter name
+const { data } = await session.skill('triage', {
+  args: { issueNumber: 42 },
+  result: v.object({
+    severity: v.picklist(['low', 'medium', 'high', 'critical']),
+    reproducible: v.boolean(),
+  }),
+});
+
+// Reference by relative path
+await session.skill('triage/reproduce.md', { args: { issueNumber: 42 } });
+```
+
+<ParamField path="name" type="string" required>
+  Skill name (from frontmatter `name:`) or relative path under `.agents/skills/`.
+</ParamField>
+
+<ParamField path="options.args" type="Record<string, unknown>">
+  Arguments passed into the skill template.
+</ParamField>
+
+<ParamField path="options.result" type="Valibot schema">
+  Schema for structured output.
+</ParamField>
+
+<ParamField path="options.role" type="string">
+  Call-scoped role override.
+</ParamField>
+
+<ParamField path="options.model" type="string">
+  Call-scoped model override.
+</ParamField>
+
+<ParamField path="options.thinkingLevel" type="'off' | 'low' | 'medium' | 'high'">
+  Reasoning effort for this call.
+</ParamField>
+
+<ParamField path="options.signal" type="AbortSignal">
+  Cancel this call.
+</ParamField>
+
+Returns `CallHandle<PromptResponse>` or `CallHandle<PromptResultResponse<T>>`.
+
+## `task(text, options?)`
+
+Launch a detached child agent in a separate session for focused, one-shot work. Shares the same sandbox and filesystem as the parent, but gets its own message history. The LLM can also call the `task` tool autonomously during `prompt()` and `skill()` calls.
+
+```typescript
+const research = await session.task(
+  'Research the auth flow and summarize the key files.',
+  { cwd: '/workspace/project', role: 'researcher' }
+);
+
+const plan = await session.prompt(
+  `Use this research to draft the implementation plan:\n\n${research.text}`
+);
+```
+
+<ParamField path="text" type="string" required>
+  The task prompt for the child agent.
+</ParamField>
+
+<ParamField path="options.cwd" type="string">
+  Working directory for the child session. Defaults to the parent session's `cwd`.
+</ParamField>
+
+<ParamField path="options.result" type="Valibot schema">
+  Schema for structured output.
+</ParamField>
+
+<ParamField path="options.role" type="string">
+  Role for the child agent.
+</ParamField>
+
+<ParamField path="options.model" type="string">
+  Model for the child agent.
+</ParamField>
+
+<ParamField path="options.signal" type="AbortSignal">
+  Cancel this task.
+</ParamField>
+
+Returns `CallHandle<PromptResponse>` or `CallHandle<PromptResultResponse<T>>`.
+
+## `shell(command, options?)`
+
+Run a shell command. Unlike `harness.shell()`, this call **is recorded** in the conversation transcript, making the output visible to the model in subsequent turns.
+
+```typescript
+const { stdout, exitCode } = await session.shell('git log --oneline -5');
+```
+
+<ParamField path="command" type="string" required>
+  Shell command to execute.
+</ParamField>
+
+<ParamField path="options.cwd" type="string">
+  Working directory.
+</ParamField>
+
+<ParamField path="options.env" type="Record<string, string>">
+  Additional environment variables.
+</ParamField>
+
+<ParamField path="options.signal" type="AbortSignal">
+  Cancel this call.
+</ParamField>
+
+Returns `CallHandle<ShellResult>` — `{ stdout, stderr, exitCode }`.
+
+<Note>
+Use `harness.shell()` for setup work the model shouldn't see (e.g. cloning a repo before starting a session). Use `session.shell()` when the output should be visible to the model in the conversation.
+</Note>
+
+## `compact()`
+
+Trigger context compaction on demand. Summarizes older messages to free context window space — the same operation that runs automatically when the session approaches the token limit.
+
+```typescript
+await session.compact();
+```
+
+- Resolves as a no-op if there is nothing to compact.
+- Throws if another operation (`prompt`, `skill`, `task`, `shell`) is in-flight on this session.
+- Emits `compaction_start` (with `reason: "manual"`) followed by `compaction` events.
+
+## `delete()`
+
+Delete this session's stored conversation state.
+
+```typescript
+await session.delete();
+```
+
+## Response types
+
+### `PromptResponse`
+
+Returned by `prompt()`, `skill()`, and `task()` without a `result` schema.
+
+<ResponseField name="text" type="string">
+  The model's final text output.
+</ResponseField>
+
+<ResponseField name="usage" type="PromptUsage">
+  Aggregated token and cost usage for the entire call (all turns, retries, and any compaction triggered during the call).
+</ResponseField>
+
+<ResponseField name="model" type="PromptModel">
+  The model selected for the call's primary turn (`{ id: string }`).
+</ResponseField>
+
+### `PromptResultResponse<T>`
+
+Returned when a `result` schema is provided.
+
+<ResponseField name="data" type="T">
+  The schema-validated structured output. Replaces the deprecated `result` field.
+</ResponseField>
+
+<ResponseField name="usage" type="PromptUsage">
+  Token and cost usage.
+</ResponseField>
+
+<ResponseField name="model" type="PromptModel">
+  Selected model for the call.
+</ResponseField>
+
+### `PromptUsage`
+
+<ResponseField name="input" type="number">Input tokens consumed.</ResponseField>
+<ResponseField name="output" type="number">Output tokens produced.</ResponseField>
+<ResponseField name="cacheRead" type="number">Tokens read from prompt cache.</ResponseField>
+<ResponseField name="cacheWrite" type="number">Tokens written to prompt cache.</ResponseField>
+<ResponseField name="totalTokens" type="number">Sum of all token counts.</ResponseField>
+<ResponseField name="cost.total" type="number">
+  Total cost in the provider's pricing unit (USD for Anthropic, OpenAI, etc.). Computed as `(rate_per_million / 1_000_000) * tokens`.
+</ResponseField>

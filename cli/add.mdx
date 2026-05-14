@@ -1,0 +1,132 @@
+---
+title: "flue add — install sandbox connectors"
+description: "flue add fetches connector installation instructions from the Flue registry and pipes them to your AI coding agent, which writes the adapter file."
+---
+
+`flue add` fetches connector installation instructions from the Flue registry and routes them to the right place. When run by an AI coding agent, it prints the connector markdown to stdout for the agent to read and execute. When run by a human in a terminal, it shows a short recipe to pipe to an agent.
+
+## Usage
+
+```bash
+flue add [<name>|<url>] [--category <category>] [--print]
+```
+
+## Flags
+
+<ParamField path="name" type="string">
+  Connector slug (e.g. `daytona`, `e2b`) or a provider docs URL (when used with `--category`).
+</ParamField>
+
+<ParamField path="--category" type="string">
+  Connector category (e.g. `sandbox`). Use this alongside a URL positional argument to build a connector from scratch using the provider's own documentation as the agent's starting point.
+
+  Requires a URL or path argument — the URL is substituted into the category's generic instructions.
+
+  ```bash
+  flue add https://e2b.dev --category sandbox | claude
+  ```
+</ParamField>
+
+<ParamField path="--print" type="boolean" default="false">
+  Always print the raw connector markdown to stdout, regardless of whether the caller is an AI agent. Useful when you want to inspect the instructions or pipe them manually.
+</ParamField>
+
+## How it works
+
+`flue add` behaves differently depending on who is running it:
+
+<AccordionGroup>
+  <Accordion title="Run by a human in a terminal">
+    Prints a short recipe to stderr showing how to pipe the connector to your agent:
+
+    ```
+    flue add daytona
+
+    To install this connector, pipe it to your coding agent:
+
+      flue add daytona --print | claude
+      flue add daytona --print | codex
+      flue add daytona --print | cursor-agent
+      flue add daytona --print | opencode
+      flue add daytona --print | pi
+
+    Or paste this prompt into any agent:
+
+      Run "flue add daytona --print" and follow the instructions.
+    ```
+  </Accordion>
+  <Accordion title="Run by an AI coding agent">
+    Detected automatically via `@vercel/detect-agent`. When an agent is the caller, `flue add` prints the connector markdown directly to stdout for the agent to read and execute — no extra flags needed.
+
+    ```bash
+    # Run directly inside an agent tool call:
+    flue add daytona
+    ```
+  </Accordion>
+  <Accordion title="Run with --print">
+    Always prints the connector markdown to stdout, regardless of caller. Use this to inspect the instructions or pipe them manually from a human terminal session.
+
+    ```bash
+    flue add daytona --print | claude
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Listing available connectors
+
+Run `flue add` with no arguments to see the full list of available connectors:
+
+```bash
+flue add
+```
+
+Output:
+
+```
+flue add <name>
+
+Available connectors:
+  flue add daytona     sandbox     https://daytona.io
+  flue add e2b         sandbox     https://e2b.dev
+  ...
+
+Don't see what you need?
+
+  flue add <url> --category sandbox
+    Build a sandbox connector from scratch. Pass a URL pointing at the
+    provider's docs (homepage, SDK reference, GitHub repo, anything useful) as
+    the agent's starting point. Pipe to your coding agent.
+```
+
+## Building a connector from scratch
+
+If the connector you need is not listed, you can build one from scratch by pointing the agent at the provider's documentation:
+
+```bash
+flue add https://e2b.dev --category sandbox | claude
+```
+
+The `--category` flag fetches the generic instructions for that category type and substitutes your URL as the provider's starting point. Your coding agent reads the instructions and writes a small TypeScript adapter into your project.
+
+## Examples
+
+```bash
+# List all available connectors
+flue add
+
+# Install the Daytona connector via Claude
+flue add daytona | claude
+
+# Install via opencode
+flue add daytona | opencode
+
+# Build a sandbox connector from a provider's docs URL
+flue add https://e2b.dev --category sandbox | claude
+
+# Inspect the connector markdown without installing
+flue add daytona --print
+```
+
+## Connector registry
+
+Named connectors are fetched from `https://flueframework.com/cli/connectors/<slug>.md`. The connector markdown contains instructions that your AI coding agent follows to write a small TypeScript adapter — typically at `.flue/connectors/<name>.ts` or `connectors/<name>.ts` — into your project.

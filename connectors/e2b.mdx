@@ -1,0 +1,98 @@
+---
+title: "E2B sandbox connector for Flue"
+description: "Install the E2B connector to run Flue agents inside Firecracker microVMs — fast ephemeral sandboxes with Python and Node.js pre-installed."
+---
+
+[E2B](https://e2b.dev) provides Firecracker microVMs — full Linux sandboxes with sub-second cold starts (in the same region), persistent disk during their lifetime, and built-in Python and Node.js support. They're designed for fast, ephemeral code execution.
+
+## Install the connector
+
+Run `flue add e2b` and pipe it to your coding agent. The agent reads the connector instructions and writes `.flue/connectors/e2b.ts` into your project.
+
+```bash
+flue add e2b | claude
+flue add e2b | opencode
+flue add e2b | codex
+flue add e2b | cursor-agent
+```
+
+The agent also installs `e2b` if it isn't already in your `package.json`.
+
+## Set up your API key
+
+You need `E2B_API_KEY` at runtime. Get one from the [E2B dashboard](https://e2b.dev/dashboard). Add it to your `.env` file, CI secrets, or equivalent:
+
+```bash
+# .env
+E2B_API_KEY="your-api-key"
+```
+
+The `e2b` SDK reads `E2B_API_KEY` from the environment automatically — you don't pass it explicitly when creating a sandbox.
+
+Pass the file to Flue's dev server or run command:
+
+```bash
+flue dev --target node --env .env
+flue run my-agent --target node --env .env
+```
+
+## Basic usage
+
+After the connector is installed, create an E2B sandbox and pass it to `init()`:
+
+```typescript
+import type { FlueContext } from '@flue/runtime';
+import { Sandbox } from 'e2b';
+import { e2b } from '../connectors/e2b';
+
+export const triggers = { webhook: true };
+
+export default async function ({ init }: FlueContext) {
+  // E2B reads E2B_API_KEY from the environment automatically.
+  const sandbox = await Sandbox.create();
+
+  const harness = await init({
+    sandbox: e2b(sandbox),
+    model: 'anthropic/claude-sonnet-4-6',
+  });
+  const session = await harness.session();
+
+  return await session.shell('uname -a');
+}
+```
+
+You own the sandbox lifecycle. Flue does not close or delete it — you decide when the sandbox's session ends.
+
+## Custom templates
+
+E2B supports custom templates — pre-built snapshots with your tools already installed. If you run many short-lived agents against the same prepared environment, a custom template avoids reinstalling tooling on every cold start:
+
+```typescript
+const sandbox = await Sandbox.create('my-template-name');
+```
+
+Create and manage templates from the E2B dashboard or CLI. See [E2B's templates documentation](https://e2b.dev/docs/sandbox-template) for details.
+
+## Code interpreter variant
+
+If you're building a Jupyter-style code interpreter agent, E2B also publishes `@e2b/code-interpreter`, which re-exports the same `Sandbox` class with extra `runCode` methods. The connector works with it too — install `@e2b/code-interpreter` instead of `e2b` and adjust the import in the connector file:
+
+```typescript
+import type { Sandbox as E2BSandbox } from '@e2b/code-interpreter';
+```
+
+## When to use E2B
+
+E2B works from any Flue deployment target — Node.js, Cloudflare, GitHub Actions. It's the right choice when your agent needs:
+
+- Fast ephemeral sandboxes with sub-second cold starts
+- Python or Node.js environments without complex setup
+- Short-lived code execution without persistent state across requests
+
+For agents that need a full coding environment with git, a cloned repo, or declarative image builds, consider [Daytona](/connectors/daytona). For agents running on Cloudflare, see the [Cloudflare connector](/connectors/cloudflare).
+
+## Resources
+
+- [E2B documentation](https://e2b.dev/docs)
+- [E2B SDK reference](https://e2b.dev/docs/sdk-reference)
+- [E2B dashboard](https://e2b.dev/dashboard)

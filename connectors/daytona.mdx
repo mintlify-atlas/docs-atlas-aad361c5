@@ -1,0 +1,139 @@
+---
+title: "Daytona sandbox connector for Flue"
+description: "Install the Daytona connector to give Flue agents a full Linux container with persistent filesystem, shell access, and a declarative image builder."
+---
+
+[Daytona](https://www.daytona.io/) provides full Linux containers with persistent filesystem, shell access, git, Node.js, Python, and a declarative image builder that caches your environment after the first build. It's designed for coding agents that need a complete dev environment.
+
+## Install the connector
+
+Run `flue add daytona` and pipe it to your coding agent. The agent reads the connector instructions and writes `.flue/connectors/daytona.ts` into your project.
+
+```bash
+flue add daytona | claude
+flue add daytona | opencode
+flue add daytona | codex
+flue add daytona | cursor-agent
+```
+
+The agent also installs `@daytona/sdk` if it isn't already in your `package.json`.
+
+## Set up your API key
+
+You need `DAYTONA_API_KEY` at runtime. Get one from the [Daytona dashboard](https://www.daytona.io/). Add it to the same place as your model provider key — a `.env` file, CI secrets, or a Cloudflare secrets bundle.
+
+```bash
+# .env
+DAYTONA_API_KEY="your-api-key"
+```
+
+Pass the file to Flue's dev server or run command:
+
+```bash
+flue dev --target node --env .env
+flue run my-agent --target node --env .env
+```
+
+Daytona also reads optional `DAYTONA_API_URL` and `DAYTONA_TARGET` for custom endpoints and region selection.
+
+## Basic usage
+
+After the connector is installed, create a Daytona sandbox and pass it to `init()`:
+
+```typescript
+import type { FlueContext } from '@flue/runtime';
+import { Daytona } from '@daytona/sdk';
+import { daytona } from '../connectors/daytona';
+
+export const triggers = { webhook: true };
+
+export default async function ({ init, env }: FlueContext) {
+  const client = new Daytona({ apiKey: env.DAYTONA_API_KEY });
+  const sandbox = await client.create();
+
+  const harness = await init({
+    sandbox: daytona(sandbox),
+    model: 'anthropic/claude-sonnet-4-6',
+  });
+  const session = await harness.session();
+
+  return await session.shell('uname -a');
+}
+```
+
+You own the sandbox. Flue does not delete it — sandboxes persist across requests by default, which lets you debug, inspect logs, or warm-reuse the same environment.
+
+## Full coding agent example
+
+For a full coding agent, create the sandbox, run setup steps in a first session, then start the working session rooted at the project directory:
+
+```typescript
+// .flue/agents/code.ts
+import { type FlueContext } from '@flue/runtime';
+import { Daytona } from '@daytona/sdk';
+import { daytona } from '../connectors/daytona';
+
+export const triggers = { webhook: true };
+
+export default async function ({ init, payload, env }: FlueContext) {
+  const client = new Daytona({ apiKey: env.DAYTONA_API_KEY });
+  const sandbox = await client.create();
+
+  // Setup: clone the repo and install dependencies.
+  const setupHarness = await init({
+    sandbox: daytona(sandbox),
+    model: 'openai/gpt-5.5',
+  });
+  const setup = await setupHarness.session();
+  await setup.shell(`git clone ${payload.repo} /workspace/project`);
+  await setup.shell('npm install', { cwd: '/workspace/project' });
+
+  // Working session: same sandbox, rooted at the project directory.
+  // AGENTS.md and skills are discovered from /workspace/project.
+  const projectHarness = await init({
+    name: 'project',
+    sandbox: daytona(sandbox),
+    cwd: '/workspace/project',
+    model: 'openai/gpt-5.5',
+  });
+  const session = await projectHarness.session();
+
+  return await session.prompt(payload.prompt);
+}
+```
+
+Both `init()` calls share the same Daytona sandbox. The second passes `cwd` so the agent's tools — grep, glob, read, shell — operate inside the cloned project.
+
+## Declarative image builder
+
+For faster subsequent starts, use Daytona's declarative image builder to define the environment in code and cache it as a snapshot. Pass a snapshot ID at creation time:
+
+```typescript
+const sandbox = await client.create({ snapshot: 'my-snapshot-id' });
+```
+
+To boot from a Docker image instead:
+
+```typescript
+const sandbox = await client.create({ image: 'debian:12.9' });
+```
+
+Daytona builds and caches a snapshot from the image on first use. Subsequent sessions against that snapshot start instantly. See [Daytona's snapshots docs](https://www.daytona.io/docs/en/snapshots) for the full declarative builder reference.
+
+## When to use Daytona
+
+Daytona works from any Flue deployment target — Node.js, Cloudflare, GitHub Actions. It's the right choice when your agent needs:
+
+- A full Linux environment with git, Node.js, Python, or system tools
+- A persistent filesystem that survives across sessions
+- A cloned repo and installed dependencies ready before prompting
+- Declarative environment snapshots for fast, reproducible starts
+
+For high-traffic or high-scale agents where startup time matters more than environment depth, consider a virtual sandbox instead.
+
+## Resources
+
+- [Daytona documentation](https://www.daytona.io/docs/)
+- [TypeScript SDK reference](https://www.daytona.io/docs/en/typescript-sdk/daytona/)
+- [Daytona Slack community](https://go.daytona.io/slack)
+- [daytonaio/daytona on GitHub](https://github.com/daytonaio/daytona)

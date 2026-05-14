@@ -1,0 +1,107 @@
+---
+title: 'flue.config.ts: project configuration'
+description: 'flue.config.ts sets project-wide defaults for build target, root directory, and output path using defineConfig. CLI flags always take precedence.'
+---
+
+`flue.config.ts` is the build-time configuration file for your Flue project. It sets project-wide defaults for `target`, `root`, and `output` — the three knobs that shape how `flue dev`, `flue run`, and `flue build` locate your source and write their artifacts.
+
+Provider registration and model configuration are **not** build-time concerns. Those belong in `app.ts` where runtime environment variables and platform bindings are available. See [Configuring AI model providers](/configuration/providers).
+
+## Supported file extensions
+
+Flue discovers your config file automatically, searching for these names in priority order:
+
+- `flue.config.ts`
+- `flue.config.mts`
+- `flue.config.mjs`
+- `flue.config.js`
+- `flue.config.cjs`
+- `flue.config.cts`
+
+To point at a config file elsewhere, pass `--config <path>` to any CLI command. CLI flags always override values from the config file on a per-field basis.
+
+<Note>
+Config files are loaded via Node's native TypeScript support. This requires **Node.js >= 22.18.0**. TypeScript syntax that Node's type-stripping loader doesn't support — such as `enum`, `namespace` with runtime code, parameter properties, and decorators — is not allowed in the config file. Stick to erasable types, or use a `.js` config instead.
+</Note>
+
+## The `defineConfig` helper
+
+Import `defineConfig` from `@flue/cli/config` to get type inference and editor intellisense. It's an identity function — it returns its argument unchanged — so wrapping your config object in it costs nothing at runtime.
+
+```typescript flue.config.ts
+import { defineConfig } from '@flue/cli/config';
+
+export default defineConfig({
+  target: 'node',
+});
+```
+
+## Config options
+
+<ParamField path="target" type="'node' | 'cloudflare'">
+  The deployment target. Controls which build plugin runs (`flue build`) and which dev server is used (`flue dev`).
+
+  - `'node'` — produces a bundled `dist/server.mjs` for Node.js hosts.
+  - `'cloudflare'` — produces a TypeScript entry for `wrangler` to bundle and deploy.
+
+  Required somewhere: either here or via the `--target` CLI flag. Omitting it from both causes a clear error at startup.
+</ParamField>
+
+<ParamField path="root" type="string">
+  The project root directory. Source files (`agents/`, `roles/`) are discovered from `<root>/.flue/` if that directory exists, otherwise from `<root>/` directly.
+
+  Relative paths resolve against the directory containing the config file (Vite-style: the config file's directory _is_ the project root by default). Defaults to that directory when unset.
+</ParamField>
+
+<ParamField path="output" type="string">
+  The build output directory. `flue build` writes `server.mjs`, `wrangler.jsonc`, and other artifacts here.
+
+  Relative paths resolve against the config file's directory. Defaults to `<root>/dist`.
+</ParamField>
+
+## Examples
+
+<Tabs>
+  <Tab title="Minimal">
+    Most projects only need to set `target`. The hello-world example intentionally leaves `target` unset so it works with either `--target node` or `--target cloudflare` from the CLI:
+
+    ```typescript flue.config.ts
+    import { defineConfig } from '@flue/cli/config';
+
+    export default defineConfig({});
+    ```
+
+    With `target` pinned:
+
+    ```typescript flue.config.ts
+    import { defineConfig } from '@flue/cli/config';
+
+    export default defineConfig({
+      target: 'node',
+    });
+    ```
+  </Tab>
+  <Tab title="Full">
+    A config with all three fields set — useful when your project root and output directory differ from the config file's location:
+
+    ```typescript flue.config.ts
+    import { defineConfig } from '@flue/cli/config';
+
+    export default defineConfig({
+      target: 'cloudflare',
+      root: './src',
+      output: './dist/workers',
+    });
+    ```
+  </Tab>
+</Tabs>
+
+## Config discovery and precedence
+
+The CLI searches for a config file starting from the directory you pass as `--root`, or the current working directory if `--root` is omitted. Precedence from highest to lowest:
+
+1. CLI inline flags (`--target`, `--root`, `--output`)
+2. `flue.config.*` values
+3. Built-in defaults (`root` = config file directory, `output` = `<root>/dist`)
+
+Only the fields you actually pass via CLI flags override the file — unset flags fall through to the config file value or the default.

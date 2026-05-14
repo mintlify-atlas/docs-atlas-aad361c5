@@ -1,0 +1,110 @@
+---
+title: "Flue: The Agent Harness Framework"
+description: "Flue is a runtime-agnostic TypeScript framework for building headless, programmable AI agents that deploy anywhere — no TUI, no GUI, just code."
+---
+
+Flue is **the agent harness framework**. If you know how to use Claude Code, Codex, or OpenCode, you already understand the basics — Flue gives you those same capabilities as a 100% headless, programmable TypeScript API. There's no baked-in assumption that a human operator is present. No TUI. No GUI. Just TypeScript agents that run autonomously, solve problems, and deploy anywhere.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build and invoke your first agent in under five minutes.
+  </Card>
+  <Card title="Core concepts" icon="book" href="/concepts">
+    Understand agents, harnesses, sessions, sandboxes, and the full hierarchy.
+  </Card>
+  <Card title="CLI reference" icon="terminal" href="/cli/overview">
+    Every `flue` command: `dev`, `run`, `build`, `init`, `add`, `logs`.
+  </Card>
+  <Card title="API reference" icon="brackets-curly" href="/api/flue-context">
+    Full TypeScript types for `FlueContext`, `FlueHarness`, and `FlueSession`.
+  </Card>
+</CardGroup>
+
+## What makes Flue different
+
+Most AI SDKs give you a thin wrapper around a model's HTTP API. Flue is a proper **runtime-agnostic framework** — think Astro or Next.js, but for agents. You write agent files in TypeScript, Flue builds them into a deployable server artifact, and that artifact runs identically on Node.js, Cloudflare Workers, GitHub Actions, or GitLab CI.
+
+Agents in Flue require very little code. Most of the "logic" lives in Markdown — skills, context, and `AGENTS.md` files that the agent discovers from its working directory at runtime.
+
+```typescript
+// .flue/agents/hello.ts
+import type { FlueContext } from '@flue/runtime';
+import * as v from 'valibot';
+
+export const triggers = { webhook: true };
+
+export default async function ({ init, payload }: FlueContext) {
+  const harness = await init({ model: 'anthropic/claude-sonnet-4-6' });
+  const session = await harness.session();
+
+  const { data } = await session.prompt(
+    `Translate this to ${payload.language}: "${payload.text}"`,
+    {
+      result: v.object({
+        translation: v.string(),
+        confidence: v.picklist(['low', 'medium', 'high']),
+      }),
+    },
+  );
+
+  return data;
+}
+```
+
+## How Flue works
+
+Agent files live in `.flue/agents/`. Each file is a named agent: `hello.ts` becomes the `hello` agent, reachable at `POST /agents/hello/<id>`. The `<id>` URL segment identifies the **agent instance** — the durable scope for one customer, conversation, or repository boundary.
+
+`flue build` compiles your agent directory (agents, skills, roles, `AGENTS.md`) into a self-contained server artifact. `flue dev` runs a live-reloading version of that server locally. `flue run` builds and invokes a single agent in one shot — useful for CI.
+
+## Key capabilities
+
+<CardGroup cols={2}>
+  <Card title="Virtual sandboxes" icon="microchip">
+    Agents run in a fast, cheap in-process sandbox powered by [just-bash](https://github.com/vercel-labs/just-bash). No container, no spin-up time. Scales to high traffic without added cost.
+  </Card>
+  <Card title="Remote sandboxes" icon="server">
+    Need a full Linux environment? Connect real containers via Daytona, E2B, Cloudflare Containers, or any custom connector. Install `flue add daytona` to get started.
+  </Card>
+  <Card title="Typed results" icon="code">
+    Pass a Valibot schema as `result:` to any `prompt()`, `skill()`, or `task()` call and get back schema-validated, fully-typed data.
+  </Card>
+  <Card title="Skills and roles" icon="graduation-cap">
+    Shape agent behavior with reusable Markdown instruction files. Skills define step-by-step procedures; roles define personas and model selection.
+  </Card>
+  <Card title="MCP support" icon="plug">
+    Connect to any remote MCP server with `connectMcpServer()` and pass its tool list directly to your harness. Secrets stay in `env`, never in prompts.
+  </Card>
+  <Card title="Persistent sessions" icon="database">
+    On Cloudflare, sessions are backed by Durable Objects and survive indefinitely. On Node.js, sessions are in-memory unless you provide a custom store.
+  </Card>
+</CardGroup>
+
+## Architecture overview
+
+Every Flue agent run moves through a strict hierarchy of objects. Understanding this hierarchy makes it easier to reason about state, persistence, and isolation:
+
+```
+Agent (definition)              — .flue/agents/<name>.ts; named by its file
+└─ AgentInstance                — URL <id> segment; the durable runtime boundary
+   └─ Run                       — one HTTP invocation; has a runId
+      └─ Harness                — one init() call; configures model, sandbox, tools
+         └─ Session             — message history + metadata within a harness
+            └─ Operation        — one prompt() / skill() / task() / shell() call
+               └─ Turn          — one LLM round-trip
+```
+
+- **Agent** — the TypeScript source file. Named by filename.
+- **AgentInstance** — identified by the URL `<id>` segment, exposed as `ctx.id`. The durable scope for files, sessions, and conversation history.
+- **Run** — one HTTP invocation, exposed as `ctx.runId`. Short-lived.
+- **Harness** — returned by `init()`. Holds model defaults, sandbox, tools, and sessions. Multiple harnesses can exist per run when you call `init({ name })`.
+- **Session** — message history and conversation metadata inside a harness. Default name is `"default"`. Use `harness.session(threadName)` for multiple conversations per harness.
+- **Operation** — one `session.prompt()`, `.skill()`, `.task()`, or `.shell()` call.
+- **Turn** — one LLM round-trip inside an operation.
+
+## Package overview
+
+| Package | Description |
+|---|---|
+| [`@flue/runtime`](https://github.com/withastro/flue/tree/main/packages/runtime) | Runtime library: harness, sessions, tools, sandbox plumbing. The dependency your built agent uses at runtime. |
+| [`@flue/cli`](https://github.com/withastro/flue/tree/main/packages/cli) | CLI + build/dev tooling. Provides the `flue` binary: `dev`, `run`, `build`, `init`, `add`, `logs`. |

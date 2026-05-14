@@ -1,0 +1,156 @@
+---
+title: "Custom tools and MCP servers in Flue"
+description: "Define custom ToolDef handlers and connect remote MCP servers to extend your Flue agent with external APIs, services, and capabilities."
+---
+
+Every Flue agent has a set of built-in tools automatically. You can extend these with your own custom tools, or connect external tool providers via MCP (Model Context Protocol).
+
+## Built-in tools
+
+Every session gets these tools automatically, regardless of sandbox:
+
+| Tool | Description |
+|------|-------------|
+| `bash` | Execute shell commands. Returns stdout and stderr. |
+| `read` | Read a file or list a directory. Truncated at 2000 lines or 50KB. |
+| `write` | Write content to a file. Creates the file and parent directories if needed. |
+| `edit` | Edit a file using exact text replacement. |
+| `grep` | Search file contents for a regex pattern. |
+| `glob` | Find files by filename pattern. |
+| `task` | Delegate a focused task to a detached child agent. |
+
+The full list is available as the `BUILTIN_TOOL_NAMES` constant:
+
+```typescript
+import { BUILTIN_TOOL_NAMES } from '@flue/runtime';
+// Set { 'bash', 'read', 'write', 'edit', 'grep', 'glob', 'task' }
+```
+
+Custom tool names must not conflict with any name in this set.
+
+## Custom tools
+
+Define a custom tool with the `ToolDef` interface:
+
+```typescript
+import { Type, type FlueContext, type ToolDef } from '@flue/runtime';
+
+const calculator: ToolDef = {
+  name: 'calculator',
+  description: 'Perform arithmetic. Returns the numeric result as a string.',
+  parameters: Type.Object({
+    expression: Type.String({ description: 'A math expression like "2 + 3"' }),
+  }),
+  execute: async (args) => {
+    const result = Function(`"use strict"; return (${args.expression})`)();
+    return String(result);
+  },
+};
+```
+
+### `ToolDef` fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | `string` | Unique tool name. Must not conflict with built-in tool names. |
+| `description` | `string` | Tells the model when and how to use this tool. Write this carefully — it directly affects whether the model calls the tool. |
+| `parameters` | `TSchema` | JSON Schema-compatible parameter schema. Use `Type` from `@flue/runtime` for hand-written schemas. |
+| `execute` | `(args, signal?) => Promise<string>` | Async function that performs the tool's work. Thrown errors become tool errors returned to the model. |
+
+### Building parameter schemas with `Type`
+
+`Type` is re-exported from pi-ai and provides a convenient fluent API for building JSON Schema objects:
+
+```typescript
+import { Type } from '@flue/runtime';
+
+const params = Type.Object({
+  query: Type.String({ description: 'Search query' }),
+  limit: Type.Optional(Type.Number({ description: 'Max results (default: 10)' })),
+  filters: Type.Optional(
+    Type.Array(Type.String(), { description: 'Tag filters' }),
+  ),
+});
+```
+
+### Passing tools to `init()` — harness-wide
+
+Tools passed to `init()` are available to every `prompt()`, `skill()`, and `task()` call in that harness:
+
+```typescript
+const harness = await init({
+  model: 'anthropic/claude-sonnet-4-6',
+  tools: [calculator, searchTool],
+});
+```
+
+### Passing tools per call — call-scoped
+
+Tools passed directly to `prompt()` or `skill()` are available only for that call. They are added on top of harness-wide tools and must not reuse the same names:
+
+```typescript
+const { text } = await session.prompt(
+  'Use the calculator tool to compute 7 * 6.',
+  { tools: [calculator] },
+);
+```
+
+## MCP (Model Context Protocol)
+
+Connect to a remote MCP server using `connectMcpServer()`. The function returns a connection object with a `tools` array you can pass directly to `init()` or a prompt call.
+
+```typescript
+import { connectMcpServer, type FlueContext } from '@flue/runtime';
+
+export const triggers = { webhook: true };
+
+export default async function ({ init, payload, env }: FlueContext) {
+  const github = await connectMcpServer('github', {
+    url: 'https://mcp.github.com/mcp',
+    headers: {
+      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+    },
+  });
+
+  try {
+    const harness = await init({
+      model: 'anthropic/claude-sonnet-4-6',
+      tools: github.tools,
+    });
+    const session = await harness.session();
+    return await session.prompt(payload.prompt);
+  } finally {
+    await github.close();
+  }
+}
+```
+
+Always call `close()` in a `finally` block to release the MCP connection even if the agent throws.
+
+### `connectMcpServer()` options
+
+```typescript
+connectMcpServer(name: string, options: McpServerOptions)
+```
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `url` | `string \| URL` | URL of the remote MCP server. |
+| `headers` | `HeadersInit` | Auth headers. Keep secrets in `env` rather than hardcoding them. |
+| `transport` | `'streamable-http' \| 'sse'` | Transport protocol. Defaults to `'streamable-http'` (modern). Use `'sse'` for legacy MCP servers. |
+| `requestInit` | `RequestInit` | Additional options merged into every fetch request. |
+
+The function returns `{ name, tools, close() }`. Pass `tools` to `init()` for harness-wide availability, or to individual calls for call-scoped access.
+
+### MCP tool naming
+
+Flue automatically prefixes MCP tool names with `mcp__<server>__<tool>` to avoid conflicts. For example, a tool named `list_repos` from a server named `github` becomes `mcp__github__list_repos`.
+
+### Limitations
+
+In this version, Flue does not:
+- Auto-detect which transport a server supports
+- Spawn local stdio MCP servers
+- Handle OAuth callbacks
+
+For servers that require OAuth, complete authentication externally and pass the resulting token via `headers`.

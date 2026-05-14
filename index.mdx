@@ -1,133 +1,87 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
-icon: 'star'
+title: "Flue: The Headless Agent Harness Framework"
+description: "Flue is a TypeScript framework for building programmable AI agents that deploy anywhere — Node.js, Cloudflare Workers, GitHub Actions, or GitLab CI."
 ---
 
-## Setting up
+Flue is the agent harness framework. If you know how to use Claude Code, Codex, or OpenCode, you already understand the basics — Flue gives you those same capabilities as a 100% headless, programmable TypeScript API. No TUI, no GUI, no baked-in human operator. Just TypeScript agents that run autonomously and deploy anywhere.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build and run your first agent in under five minutes.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Core concepts" icon="book" href="/concepts">
+    Understand agents, harnesses, sessions, and sandboxes.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Writing agents" icon="pen-to-square" href="/agents/writing-agents">
+    Learn the agent file format, triggers, and handler patterns.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="CLI reference" icon="terminal" href="/cli/overview">
+    Explore every `flue` command: dev, run, build, add, logs.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Why Flue?
 
-Everything you need to create world-class documentation.
+Flue is a proper runtime-agnostic framework — think Astro or Next.js, but for agents. Write once, deploy anywhere. Agents require very little code; most of the "logic" lives in Markdown — skills, context, and `AGENTS.md`.
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+<CardGroup cols={2}>
+  <Card title="Virtual sandboxes" icon="microchip">
+    Run agents in a fast, cheap in-process sandbox (powered by just-bash) — no container needed for most use cases.
   </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
+  <Card title="Remote sandboxes" icon="server">
+    Connect full Linux containers via Daytona, E2B, Cloudflare Containers, or any custom connector.
   </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
+  <Card title="Persistent sessions" icon="database">
+    Sessions persist automatically on Cloudflare (Durable Objects) or in-memory on Node.js. Conversations survive across requests.
   </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
+  <Card title="Typed results" icon="code">
+    Get schema-validated structured data back from any `prompt()`, `skill()`, or `task()` call using Valibot schemas.
   </Card>
-</Columns>
+  <Card title="MCP support" icon="plug">
+    Connect to remote MCP servers and pass their tool lists directly to your agent harness.
+  </Card>
+  <Card title="Multi-target deploys" icon="cloud">
+    One codebase, multiple targets: Node.js server, Cloudflare Workers, GitHub Actions, GitLab CI.
+  </Card>
+</CardGroup>
 
-## Make your content agent ready
+## Get started
 
-Make your docs work for humans and AI agents alike.
+<Steps>
+  <Step title="Install Flue">
+    ```bash
+    npm install @flue/runtime valibot
+    npm install -D @flue/cli
+    ```
+  </Step>
+  <Step title="Initialize your project">
+    ```bash
+    npx flue init --target node
+    ```
+  </Step>
+  <Step title="Write your first agent">
+    Create `.flue/agents/hello.ts` and add a handler with `triggers = { webhook: true }`.
+  </Step>
+  <Step title="Start the dev server">
+    ```bash
+    npx flue dev --target node --env .env
+    ```
+  </Step>
+</Steps>
 
-<Columns cols={2}>
-  <Card
-    title="Prompt component"
-    icon="robot"
-    href="/agent-ready/prompt"
-  >
-    Embed shareable AI prompts readers can copy or open in Cursor.
-  </Card>
-  <Card
-    title="Visibility"
-    icon="eye"
-    href="/agent-ready/visibility"
-  >
-    Show different content to humans and agents reading your docs.
-  </Card>
-  <Card
-    title="Contextual menu"
-    icon="bolt"
-    href="/agent-ready/contextual"
-  >
-    Give readers one-click access to Claude, ChatGPT, Cursor, and more.
-  </Card>
-  <Card
-    title="AI coding tools"
-    icon="wand-magic-sparkles"
-    href="/ai-tools/claude-code"
-  >
-    Set up Claude Code, Cursor, or Windsurf with Mintlify's skill.
-  </Card>
-</Columns>
+## Explore the docs
 
-## Need inspiration?
-
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<CardGroup cols={2}>
+  <Card title="Sandboxes" icon="box" href="/agents/sandboxes">
+    Choose between virtual, local, or remote sandboxes for your agent.
+  </Card>
+  <Card title="Skills and roles" icon="graduation-cap" href="/agents/skills-and-roles">
+    Shape agent behavior with reusable Markdown instruction sets.
+  </Card>
+  <Card title="Deploy to Cloudflare" icon="cloud" href="/deploy/cloudflare">
+    Deploy agents as Cloudflare Workers with persistent Durable Object sessions.
+  </Card>
+  <Card title="API reference" icon="brackets-curly" href="/api/flue-context">
+    Full TypeScript API documentation for `FlueContext`, `FlueHarness`, and `FlueSession`.
+  </Card>
+</CardGroup>

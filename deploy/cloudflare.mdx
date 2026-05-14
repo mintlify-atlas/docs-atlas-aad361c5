@@ -1,0 +1,317 @@
+---
+title: 'Deploy Flue agents to Cloudflare Workers'
+description: 'Build and deploy Flue agents on Cloudflare Workers with automatic session persistence via Durable Objects, R2-backed sandboxes, and container support.'
+---
+
+Build and deploy Flue agents on Cloudflare Workers. Session state is automatically persisted via Durable Objects — no configuration needed. Agents can run on fast virtual sandboxes, mount an R2 bucket as a filesystem, or spin up a full container environment via `@cloudflare/sandbox`.
+
+## Project setup
+
+<Steps>
+  <Step title="Create the project">
+    ```bash
+    mkdir my-flue-worker && cd my-flue-worker
+    npm init -y
+    npm install @flue/runtime valibot agents
+    npm install -D @flue/cli wrangler
+    ```
+
+    `agents` is Cloudflare's Agents SDK — Flue uses it to route HTTP requests to a per-agent Durable Object for session persistence.
+  </Step>
+
+  <Step title="Create your wrangler.jsonc">
+    Create `wrangler.jsonc` at the project root (alongside `package.json`). Flue merges its own Durable Object bindings into this file at build time — you only need to declare your app-specific bindings here.
+
+    ```jsonc
+    {
+      "$schema": "https://workers.cloudflare.com/schema/wrangler.json",
+      "name": "my-flue-worker",
+      "compatibility_date": "2026-04-01",
+      "compatibility_flags": ["nodejs_compat"]
+    }
+    ```
+  </Step>
+
+  <Step title="Create your first agent">
+    Source files live in `.flue/agents/` (or `agents/` at the project root for the bare layout — the two never mix).
+
+    ```typescript
+    // .flue/agents/translate.ts
+    import type { FlueContext } from '@flue/runtime';
+    import * as v from 'valibot';
+
+    export const triggers = { webhook: true };
+
+    export default async function ({ init, payload }: FlueContext) {
+      const harness = await init({ model: 'anthropic/claude-sonnet-4-6' });
+      const session = await harness.session();
+
+      const { data } = await session.prompt(
+        `Translate this to ${payload.language}: "${payload.text}"`,
+        {
+          result: v.object({
+            translation: v.string(),
+            confidence: v.picklist(['low', 'medium', 'high']),
+          }),
+        },
+      );
+
+      return data;
+    }
+    ```
+
+    `triggers = { webhook: true }` tells Flue to expose this agent as an HTTP endpoint at `POST /agents/translate/:id`.
+  </Step>
+
+  <Step title="Add your API key">
+    ```bash
+    cat > .env <<'EOF'
+    ANTHROPIC_API_KEY="your-api-key"
+    EOF
+
+    printf '\n.env\n' >> .gitignore
+    ```
+
+    Use the variable name your model provider expects. Do not commit `.env`.
+  </Step>
+
+  <Step title="Start the dev server">
+    ```bash
+    npx flue dev --target cloudflare --env .env
+    ```
+
+    `flue dev --target cloudflare` builds your project and starts a Cloudflare Workers dev server (via wrangler) on port 3583. It watches for structural changes — new agents, edited roles, wrangler.jsonc edits — and reloads the worker. For body edits to agent files, wrangler's own bundler handles hot reload automatically.
+
+    <Note>
+      `flue dev --target cloudflare` requires `wrangler` as a peer dependency in your project. It is included in the install step above.
+    </Note>
+
+    Test it:
+
+    ```bash
+    curl http://localhost:3583/agents/translate/test-1 \
+      -H "Content-Type: application/json" \
+      -d '{"text": "Hello world", "language": "French"}'
+    ```
+  </Step>
+
+  <Step title="Build and deploy">
+    ```bash
+    npx flue build --target cloudflare
+    npx wrangler deploy --secrets-file .env
+    ```
+
+    `flue build --target cloudflare` writes a Workers-compatible artifact to `./dist/`. Flue merges its Durable Object bindings into the output `dist/wrangler.jsonc`. `wrangler deploy` picks that up via a redirect at `.wrangler/deploy/config.json` — you only ever edit the root `wrangler.jsonc`.
+
+    Hit your deployed agent:
+
+    ```bash
+    curl https://my-flue-worker.<your-subdomain>.workers.dev/agents/translate/session-1 \
+      -H "Content-Type: application/json" \
+      -d '{"text": "Hello world", "language": "French"}'
+    ```
+  </Step>
+</Steps>
+
+## Session persistence
+
+When you deploy to Cloudflare, Flue uses Durable Objects to automatically persist session state — message history, context, and sandbox state all survive across requests. A user can revisit a conversation days or weeks later and pick up exactly where they left off.
+
+This is built into `--target cloudflare`. No extra configuration is needed.
+
+## Environment variables
+
+Pass `--env <path>` to load a `.env`-format file for local development:
+
+```bash
+npx flue dev --target cloudflare --env .env
+```
+
+The flag is repeatable. Later files override earlier ones on key collision. For deployment, pass the same file to wrangler:
+
+```bash
+npx wrangler deploy --secrets-file .env
+```
+
+<Note>
+  Wrangler's docs use `.dev.vars` as the convention for local secrets. The format is identical to `.env`, and Flue accepts either name — it just needs a path. Using `.env` works the same for both Node and Cloudflare targets.
+</Note>
+
+## R2-backed agents
+
+For agents that need persistent storage — a knowledge base, documentation corpus, product catalog — Flue integrates with Cloudflare R2. Mount a bucket directly as the agent's filesystem and the agent can search it with `grep`, `glob`, and `read`, just like a real filesystem.
+
+```typescript
+// .flue/agents/support.ts
+import { getVirtualSandbox } from '@flue/runtime/cloudflare';
+import type { FlueContext } from '@flue/runtime';
+
+export const triggers = { webhook: true };
+
+export default async function ({ init, payload, env }: FlueContext) {
+  const sandbox = await getVirtualSandbox(env.KNOWLEDGE_BASE);
+  const harness = await init({ sandbox, model: 'openrouter/moonshotai/kimi-k2.6' });
+  const session = await harness.session();
+
+  return await session.prompt(
+    `You are a support agent. Search the knowledge base for articles
+    relevant to this request, then write a helpful response.
+
+    Customer: ${payload.message}`,
+    { role: 'triager' },
+  );
+}
+```
+
+Add the R2 binding to your `wrangler.jsonc`:
+
+```jsonc
+{
+  "name": "my-support-agent",
+  "compatibility_date": "2026-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "r2_buckets": [
+    {
+      "binding": "KNOWLEDGE_BASE",
+      "bucket_name": "my-knowledge-base"
+    }
+  ]
+}
+```
+
+Upload content to R2:
+
+```bash
+wrangler r2 object put my-knowledge-base/articles/getting-started.md \
+  --file ./docs/getting-started.md
+```
+
+## Container sandboxes
+
+For agents that need a full Linux environment — `git`, Node.js, Python, a browser — Cloudflare provides native container support via `@cloudflare/sandbox`.
+
+<Tabs>
+  <Tab title="Single container">
+    Install the package:
+
+    ```bash
+    npm install @cloudflare/sandbox
+    ```
+
+    Add the Durable Object binding, migration, and container image to `wrangler.jsonc`. Any DO binding whose `class_name` ends with `Sandbox` is automatically wired up as `@cloudflare/sandbox`'s `Sandbox` class in the generated Worker bundle — you don't need to re-export it yourself.
+
+    ```jsonc
+    {
+      "$schema": "https://workers.cloudflare.com/schema/wrangler.json",
+      "name": "my-agent",
+      "compatibility_date": "2026-04-01",
+      "compatibility_flags": ["nodejs_compat"],
+      "durable_objects": {
+        "bindings": [{ "class_name": "Sandbox", "name": "Sandbox" }]
+      },
+      "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Sandbox"] }],
+      "containers": [{ "class_name": "Sandbox", "image": "./Dockerfile" }]
+    }
+    ```
+
+    Add a `Dockerfile` at the project root:
+
+    ```dockerfile
+    FROM docker.io/cloudflare/sandbox:0.9.2
+
+    # The base image provides node, git, curl, and /workspace.
+    # Add any extra tools your agent needs.
+    RUN apt-get update && apt-get install -y python3 python3-pip \
+        && rm -rf /var/lib/apt/lists/*
+    ```
+
+    Pin the image tag to match the `@cloudflare/sandbox` version in your `package.json` — they're versioned together.
+
+    Use the sandbox in your agent:
+
+    ```typescript
+    // .flue/agents/assistant.ts
+    import type { FlueContext } from '@flue/runtime';
+    import { getSandbox } from '@cloudflare/sandbox';
+
+    export const triggers = { webhook: true };
+
+    export default async function ({ init, id, env, payload }: FlueContext) {
+      // The binding name from wrangler.jsonc is the key on `env`.
+      const sandbox = getSandbox(env.Sandbox, id);
+      const harness = await init({ sandbox, model: 'anthropic/claude-opus-4-7' });
+      const session = await harness.session();
+
+      return await session.prompt(payload.message);
+    }
+    ```
+  </Tab>
+
+  <Tab title="Multiple containers">
+    Different agents can use different container images. Declare a separate binding for each — every `class_name` must contain `Sandbox`:
+
+    ```jsonc
+    {
+      "durable_objects": {
+        "bindings": [
+          { "class_name": "PyBoxSandbox", "name": "PyBox" },
+          { "class_name": "NodeSandbox", "name": "NodeBox" }
+        ]
+      },
+      "migrations": [
+        { "tag": "v1", "new_sqlite_classes": ["PyBoxSandbox", "NodeSandbox"] }
+      ],
+      "containers": [
+        { "class_name": "PyBoxSandbox", "image": "./docker/python.Dockerfile" },
+        { "class_name": "NodeSandbox", "image": "./docker/node.Dockerfile" }
+      ]
+    }
+    ```
+
+    Each agent grabs the sandbox it needs:
+
+    ```typescript
+    // Python agent
+    const sandbox = getSandbox(env.PyBox, id);
+
+    // Node.js agent
+    const sandbox = getSandbox(env.NodeBox, id);
+    ```
+  </Tab>
+</Tabs>
+
+## Workers AI
+
+Use Cloudflare's hosted AI models without an API key. Add the `AI` binding to `wrangler.jsonc`:
+
+```jsonc
+{
+  "name": "my-agent",
+  "compatibility_date": "2026-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": {
+    "binding": "AI"
+  }
+}
+```
+
+Then pass a `cloudflare/` model ID to `init()`:
+
+```typescript
+const harness = await init({
+  model: 'cloudflare/@cf/moonshotai/kimi-k2.6',
+});
+```
+
+Flue routes `cloudflare/...` model IDs through `env.AI.run()` automatically — no API key needed. This will error clearly on `--target node`.
+
+## Sandbox strategy
+
+| Strategy | When to use |
+| --- | --- |
+| Empty virtual sandbox | Prompt-and-response agents, stateless transforms |
+| Virtual sandbox with `session.shell()` | Small amounts of static context written at startup |
+| R2-backed virtual sandbox | Knowledge bases, large document collections |
+| Container sandbox | Coding agents, full Linux environments, system tools |
+
+Start with the empty virtual sandbox. Move up when you need to.

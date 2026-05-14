@@ -1,0 +1,63 @@
+---
+title: 'Flue CLI reference'
+description: 'Complete reference for the flue binary — dev server, one-shot runs, builds, project scaffolding, connector installs, and log streaming.'
+---
+
+The `flue` binary is the single entry point for everything in the Flue development lifecycle. It ships as part of `@flue/cli` and is available as `npx flue` or just `flue` if installed globally.
+
+```bash
+npx flue <command> [flags]
+# or, if installed globally:
+flue <command> [flags]
+```
+
+## Commands
+
+<Columns cols={2}>
+  <Card title="flue dev" icon="server" href="/cli/dev">
+    Long-running watch-mode dev server. Rebuilds and reloads on file changes.
+  </Card>
+  <Card title="flue run" icon="play" href="/cli/run">
+    One-shot build and agent invocation. Perfect for CI and scripted runs.
+  </Card>
+  <Card title="flue build" icon="package" href="/cli/build">
+    Produce a deployable artifact in `./dist` without running the agent.
+  </Card>
+  <Card title="flue init" icon="sparkles" href="/cli/init">
+    Scaffold a starter `flue.config.ts` in the target directory.
+  </Card>
+  <Card title="flue add" icon="plug" href="/cli/add">
+    Fetch and install a sandbox connector via your AI coding agent.
+  </Card>
+  <Card title="flue logs" icon="list" href="/cli/logs">
+    Stream or replay structured run events from a running Flue server.
+  </Card>
+</Columns>
+
+## Global flags
+
+These flags are accepted by `dev`, `run`, and `build`. CLI flags always override values set in `flue.config.*`.
+
+| Flag | Description |
+|------|-------------|
+| `--root <path>` | Project root. Defaults to the current working directory. Source files (`agents/`, `roles/`) live at `<root>/.flue/` if that directory exists, otherwise at `<root>/` directly. |
+| `--output <path>` | Where build artifacts are written. Default: `<root>/dist`. |
+| `--config <path>` | Path to a `flue.config.{ts,mts,mjs,js,cjs,cts}` file (relative to cwd). Default: auto-discover from the root directory. |
+| `--target <node\|cloudflare>` | Build target. Required if not set in `flue.config.*`. |
+
+## Default port
+
+The dev server listens on port **3583** by default — "FLUE" on a phone keypad. Override with `--port`.
+
+## Configuration file
+
+Any command that accepts `--config` can also pick up settings from a `flue.config.ts` (or `.mts`, `.mjs`, `.js`, `.cjs`, `.cts`) file at the project root. The config file sets `target`, `root`, and `output`; CLI flags always take precedence.
+
+```ts
+// flue.config.ts
+import { defineConfig } from '@flue/cli/config';
+
+export default defineConfig({
+  target: 'node',
+});
+```

@@ -1,0 +1,180 @@
+---
+title: "AgentInit — harness initialization options"
+description: "Options passed to ctx.init(). Configures the model, sandbox, session store, tools, default role, thinking level, and compaction behavior for a FlueHarness."
+---
+
+`AgentInit` is the options object passed to `ctx.init()`. Calling `init()` returns a [`FlueHarness`](/api/flue-harness) that manages model defaults, sandbox, tools, session store, and sessions for the current run.
+
+```typescript
+const harness = await ctx.init({
+  model: 'anthropic/claude-sonnet-4-6',
+  sandbox: local(),
+  role: 'coder',
+});
+```
+
+## Options
+
+<ParamField body="model" type="string | false" required>
+  Default model for every `prompt()`, `skill()`, and `task()` call in this harness. Format: `'provider/model-id'` (e.g. `'anthropic/claude-opus-4-20250514'`, `'openai/gpt-4.1-mini'`).
+
+  Pass `false` to require every call to resolve a model from a role or per-call `model` option. Useful when different sessions or calls need different models and you want the code to fail loudly if none is set.
+
+  **Precedence (highest wins):** per-call `model` > role `model` > harness `model`.
+</ParamField>
+
+<ParamField body="name" type="string" default="default">
+  Harness name. Use unique names when one run needs multiple isolated harness scopes (e.g. a setup harness and a project harness pointed at different working directories).
+
+  ```typescript
+  const setup = await ctx.init({ name: 'setup', model: 'anthropic/claude-sonnet-4-6' });
+  const project = await ctx.init({ name: 'project', model: 'anthropic/claude-sonnet-4-6', cwd: '/workspace/project' });
+  ```
+</ParamField>
+
+<ParamField body="cwd" type="string">
+  Working directory for context discovery (`AGENTS.md`, `.agents/skills/`, roles), built-in tools (`bash`, `read`, `write`, etc.), and shell calls. Defaults to the sandbox connector's native working directory.
+
+  Set `cwd` when you want the agent to discover project context from a specific location, for example after cloning a repository into a sandbox.
+</ParamField>
+
+<ParamField body="sandbox" type="false | SandboxFactory | BashFactory">
+  Sandbox mode for this harness:
+
+  - **Omitted / `false`**: virtual in-memory sandbox powered by [just-bash](https://github.com/vercel-labs/just-bash). No host filesystem access. Fastest and most scalable option.
+  - **`SandboxFactory`**: a remote sandbox connector (Daytona, E2B, Cloudflare Containers, etc.). The connector's `createSessionEnv()` is called once per session.
+  - **`BashFactory`**: a `() => BashLike | Promise<BashLike>` factory for a custom just-bash instance. Share a filesystem object in the closure to persist files across sessions.
+
+  ```typescript
+  // Virtual sandbox (default)
+  await ctx.init({ model: 'anthropic/claude-sonnet-4-6' });
+
+  // Remote sandbox via connector
+  await ctx.init({ sandbox: daytona(sandboxInstance), model: 'anthropic/claude-sonnet-4-6' });
+
+  // Custom just-bash factory
+  import { Bash, InMemoryFs } from 'just-bash';
+  const fs = new InMemoryFs();
+  await ctx.init({
+    sandbox: () => new Bash({ fs, cwd: '/workspace' }),
+    model: 'anthropic/claude-sonnet-4-6',
+  });
+  ```
+</ParamField>
+
+<ParamField body="persist" type="SessionStore">
+  Custom session store for persisting conversation history. Defaults to in-memory on Node.js and Durable Object SQLite on Cloudflare. Implement the `SessionStore` interface to provide your own storage backend.
+
+  ```typescript
+  interface SessionStore {
+    save(id: string, data: SessionData): Promise<void>;
+    load(id: string): Promise<SessionData | null>;
+    delete(id: string): Promise<void>;
+  }
+  ```
+</ParamField>
+
+<ParamField body="role" type="string">
+  Harness-wide default role. Applies to every `prompt()`, `skill()`, and `task()` call unless overridden at the session or call level.
+
+  **Precedence (highest wins):** per-call `role` > session `role` > harness `role`.
+
+  Roles are defined in `.flue/roles/<name>.md` (or `roles/<name>.md` for the root layout). Each role file provides a system prompt overlay, and optionally a default model and thinking level.
+</ParamField>
+
+<ParamField body="thinkingLevel" type="'off' | 'low' | 'medium' | 'high'" default="medium">
+  Default reasoning effort for every `prompt()`, `skill()`, and `task()` call. Forwarded to the underlying model's reasoning/thinking capability. Models that do not support reasoning silently ignore this setting after the level is clamped.
+
+  - `'off'` — disable extended reasoning even on models that support it.
+  - `'low'` / `'medium'` / `'high'` — progressively more reasoning effort and token budget.
+
+  **Precedence (highest wins):** per-call `thinkingLevel` > role `thinkingLevel` > harness `thinkingLevel`. When nothing is set, the harness defaults to `'medium'`.
+</ParamField>
+
+<ParamField body="tools" type="ToolDef[]">
+  Harness-wide custom tools. Available to every `prompt()`, `skill()`, and `task()` call in this harness. Per-call tools are added on top; their names must not overlap with harness tools or built-in tool names.
+
+  See [ToolDef](/api/sandbox-factory#tooldef) for the interface and `BUILTIN_TOOL_NAMES` for the reserved names.
+
+  ```typescript
+  import { Type } from '@flue/runtime';
+
+  const harness = await ctx.init({
+    model: 'anthropic/claude-sonnet-4-6',
+    tools: [
+      {
+        name: 'fetch_weather',
+        description: 'Fetch current weather for a city.',
+        parameters: Type.Object({
+          city: Type.String(),
+        }),
+        async execute(args) {
+          const res = await fetch(`https://wttr.in/${args.city}?format=3`);
+          return res.text();
+        },
+      },
+    ],
+  });
+  ```
+</ParamField>
+
+<ParamField body="compaction" type="false | CompactionConfig">
+  Context window compaction tuning.
+
+  When a session's message history approaches the model's context limit, Flue automatically summarizes older messages so the session can continue. This is compaction.
+
+  - **Omitted**: model-aware defaults apply. Compaction triggers at approximately 96% of the context window; 8,000 tokens of recent history are preserved verbatim.
+  - **`false`**: disable automatic threshold compaction. Overflow recovery and explicit `session.compact()` still run.
+  - **`CompactionConfig` object**: override individual fields.
+
+  <Expandable title="CompactionConfig fields">
+    <ParamField body="reserveTokens" type="number">
+      Token headroom to reserve at the top of the context window. Compaction triggers when used tokens exceed `contextWindow - reserveTokens`. Defaults to `min(20000, model.maxOutputTokens)`.
+    </ParamField>
+
+    <ParamField body="keepRecentTokens" type="number" default="8000">
+      Number of recent tokens to preserve verbatim after compaction. Older messages are folded into a summary; this tail remains intact so the model retains immediate context (file paths, recent tool results, current focus). Lower values compact more aggressively at the cost of recent-context fidelity.
+    </ParamField>
+
+    <ParamField body="model" type="string">
+      Model to use for summarization. Defaults to the session's model. Set a cheaper model for cost optimization or a long-context model for quality routing. Format: `'provider/modelId'`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+## Precedence rules summary
+
+| Setting | Precedence (highest → lowest) |
+|---------|-------------------------------|
+| `model` | per-call → role → harness |
+| `role` | per-call → session → harness |
+| `thinkingLevel` | per-call → role → harness (default: `'medium'`) |
+
+## Full example
+
+```typescript
+// .flue/agents/code.ts
+import { type FlueContext } from '@flue/runtime';
+import { local } from '@flue/runtime/node';
+
+export const triggers = { webhook: true };
+
+export default async function ({ init, payload, env }: FlueContext) {
+  const harness = await init({
+    name: 'project',
+    model: 'anthropic/claude-opus-4-20250514',
+    sandbox: local({ env: { GH_TOKEN: env.GH_TOKEN } }),
+    cwd: '/workspace/project',
+    role: 'coder',
+    thinkingLevel: 'high',
+    tools: [/* custom tools */],
+    compaction: {
+      keepRecentTokens: 12000,
+      model: 'anthropic/claude-haiku-4-5',
+    },
+  });
+
+  const session = await harness.session();
+  return await session.prompt(payload.prompt);
+}
+```

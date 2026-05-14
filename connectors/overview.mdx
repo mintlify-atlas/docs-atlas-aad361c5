@@ -1,0 +1,62 @@
+---
+title: "Flue connectors: sandbox provider adapters"
+description: "Connectors adapt third-party sandbox providers into Flue's SandboxFactory interface. Install via flue add, not npm — your coding agent writes the adapter."
+---
+
+Connectors adapt third-party sandbox providers into Flue's `SandboxFactory` interface. They are not npm packages — they are small TypeScript files that your AI coding agent writes into your project.
+
+## How connectors work
+
+When you run `flue add <name>`, the CLI fetches a markdown file containing connector installation instructions and pipes it to your coding agent. The agent reads the instructions and writes a TypeScript adapter file into your project.
+
+The adapter file wraps an already-initialized provider sandbox into Flue's `SandboxFactory` interface. You create and own the sandbox lifecycle; the connector just adapts it.
+
+```bash
+flue add                              # list available connectors
+flue add daytona | claude             # install daytona connector via claude
+flue add daytona | opencode           # or via opencode
+flue add daytona | codex              # or via codex
+flue add daytona | cursor-agent       # or via cursor-agent
+```
+
+When run by a human in a terminal, `flue add` prints a short copyable recipe. When run by an agent (or with `--print`), it pipes the full markdown instructions for the agent to act on.
+
+## Where connector files live
+
+Connectors follow the same source layout convention as the rest of your Flue project:
+
+- **`.flue/` layout** — `./.flue/connectors/<name>.ts`
+- **Bare layout** — `./connectors/<name>.ts`
+
+If `.flue/` exists at your project root, Flue uses the `.flue/` location. Otherwise it uses the bare layout. The two never mix.
+
+## You own the sandbox lifecycle
+
+Connectors are pure adapters. They never call `sandbox.delete()`, `sandbox.terminate()`, or `sandbox.kill()`. You create the sandbox, you decide when to destroy it. This makes it easy to reuse sandboxes across sessions or manage their lifetime from your orchestration code.
+
+## Building a connector for any provider
+
+If a connector doesn't exist for your provider yet, pass the provider's docs URL as the starting point:
+
+```bash
+flue add https://provider.dev --category sandbox | claude
+```
+
+Flue fetches the generic [sandbox connector spec](https://raw.githubusercontent.com/withastro/flue/refs/heads/main/docs/sandbox-connector-spec.md) and pipes it to your agent along with the URL. The agent reads the spec and the provider's docs, then builds a conformant `SandboxFactory` adapter from scratch.
+
+## Available connectors
+
+<CardGroup cols={2}>
+  <Card title="Daytona" icon="box" href="/connectors/daytona">
+    Full Linux containers with persistent filesystem, git, Node.js, and a declarative image builder. Best for coding agents and full dev environments.
+  </Card>
+  <Card title="E2B" icon="bolt" href="/connectors/e2b">
+    Firecracker microVMs with fast startup and Python/Node.js support. Best for ephemeral code execution agents.
+  </Card>
+  <Card title="Cloudflare" icon="cloud" href="/connectors/cloudflare">
+    Native container support inside Cloudflare Workers via `@cloudflare/sandbox`. Each session gets its own isolated Linux container.
+  </Card>
+  <Card title="Build your own" icon="wrench" href="/connectors/custom">
+    Implement `SandboxApi` for any provider. Full guide with the complete connector template and the `SandboxFactory` contract.
+  </Card>
+</CardGroup>

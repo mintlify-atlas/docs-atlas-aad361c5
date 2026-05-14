@@ -1,0 +1,94 @@
+---
+title: '`flue dev` — watch-mode dev server'
+description: 'flue dev starts a watch-mode dev server on port 3583 that rebuilds and reloads your Flue agents automatically on every source file change.'
+---
+
+`flue dev` starts a long-running dev server that watches your project root for changes, rebuilds on every edit, and reloads the running server automatically. It is the primary command for iterative local development.
+
+## Usage
+
+```bash
+flue dev [--target <node|cloudflare>] [--root <path>] [--output <path>] [--config <path>] [--port <number>] [--env <path>]...
+```
+
+## Flags
+
+<ParamField path="--target" type="string">
+  Build and serve target. Accepted values: `node` or `cloudflare`. Required if not set in `flue.config.*`.
+
+  - **`node`** — Builds a single bundled `.mjs` and spawns a Node.js child process. Every file change triggers a full rebuild and child respawn.
+  - **`cloudflare`** — Builds an unbundled TypeScript entry and hands it to [Wrangler](https://developers.cloudflare.com/workers/wrangler/) (`unstable_startWorker`). Wrangler watches the source graph itself and hot-reloads workerd on agent body edits; Flue only rebuilds when something structural changes (new or removed agent, changed triggers, `wrangler.jsonc` edit).
+</ParamField>
+
+<ParamField path="--root" type="string" default="cwd">
+  Project root directory. Source files (`agents/`, `roles/`) live at `<root>/.flue/` if that directory exists, otherwise at `<root>/` directly. Defaults to the current working directory.
+</ParamField>
+
+<ParamField path="--output" type="string" default="<root>/dist">
+  Where build artifacts are written. Defaults to `<root>/dist`.
+</ParamField>
+
+<ParamField path="--config" type="string">
+  Explicit path to a `flue.config.{ts,mts,mjs,js,cjs,cts}` file (relative to cwd). Defaults to auto-discovery from the root directory. CLI flags always override values set in the config file.
+</ParamField>
+
+<ParamField path="--port" type="number" default="3583">
+  Port for the dev server. Default is `3583` — "FLUE" on a phone keypad.
+</ParamField>
+
+<ParamField path="--env" type="string">
+  Path to a `.env`-format file to load before starting the server. Repeatable; later files override earlier ones on key collision. Shell-set environment variables win over file values.
+
+  Edits to a watched env file trigger a reload (Node: child respawn; Cloudflare: worker restart).
+
+  Works for both `node` and `cloudflare` targets.
+
+  ```bash
+  flue dev --target node --env .env --env .env.local
+  ```
+</ParamField>
+
+## Cloudflare target
+
+<Note>
+  The `cloudflare` target requires `wrangler` as a peer dependency in your project.
+
+  ```bash
+  npm install --save-dev wrangler
+  ```
+</Note>
+
+When `--target cloudflare` is set, `flue dev` delegates bundling and hot-reloading to Wrangler. Flue manages the structural rebuild cycle (new agents, changed triggers, `wrangler.jsonc` edits) while Wrangler handles source-level hot-reload for agent body changes — so plain edits to an agent's logic appear instantly without a full restart.
+
+## Dev vs. production
+
+| | `flue dev` | `flue run` |
+|---|---|---|
+| Lifecycle | Long-running; blocks until Ctrl+C | One-shot; exits after the run |
+| Rebuilds | On every file change | Once, before invocation |
+| Target | `node` or `cloudflare` | `node` only |
+| Use case | Interactive development | CI, scripts, automation |
+
+## Examples
+
+```bash
+# Start a Node.js dev server
+flue dev --target node
+
+# Start a Cloudflare dev server on a custom port
+flue dev --target cloudflare --port 8787
+
+# Load environment variables from a file
+flue dev --target node --env .env
+
+# Use a non-default project root
+flue dev --target node --root ./my-app
+```
+
+After the server starts, invoke any agent with a `curl` POST:
+
+```bash
+curl http://localhost:3583/agents/<agent-name>/<instance-id> \
+  -H 'Content-Type: application/json' \
+  -d '{}'
+```

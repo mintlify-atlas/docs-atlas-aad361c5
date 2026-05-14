@@ -1,0 +1,157 @@
+---
+title: "FlueHarness — returned by init()"
+description: "FlueHarness configures model defaults, sandbox, and sessions for one run. Returned by init(). Provides shell, fs, and session management methods."
+---
+
+`FlueHarness` is returned by `init()` and represents a configured handle for model defaults, tools, sandbox, filesystem, and sessions within a single run. Most agent code interacts with a harness to open sessions and run shell commands outside the conversation context.
+
+## Properties
+
+<ResponseField name="name" type="string">
+  The harness name. Defaults to `"default"`. Use `init({ name })` to create multiple isolated harnesses per run.
+</ResponseField>
+
+<ResponseField name="fs" type="FlueFs">
+  Out-of-band filesystem access to the harness sandbox. Operations do **not** appear in any conversation transcript. Use `fs` for plumbing (staging files, capturing artifacts, managing scratch space). If a write should feed into the model's next turn, prompt the model to read the file itself.
+</ResponseField>
+
+<ResponseField name="sessions" type="FlueSessions">
+  Explicit session management: get, create, or delete named sessions. Use `harness.session()` for the common get-or-create pattern; use `harness.sessions` when you need strict control over session existence.
+</ResponseField>
+
+## Methods
+
+### `session(name?, options?)`
+
+Get or create a named session. If the session already exists it is returned; otherwise a new one is created.
+
+```typescript
+const session = await harness.session();                     // default session
+const review  = await harness.session('review-thread');      // named session
+const scoped  = await harness.session('plan', { role: 'planner' }); // with role
+```
+
+<ParamField path="name" type="string">
+  Session name. Defaults to `"default"`.
+</ParamField>
+
+<ParamField path="options.role" type="string">
+  Session-wide default role. Per-call roles override this.
+</ParamField>
+
+Returns `Promise<FlueSession>`.
+
+### `shell(command, options?)`
+
+Run a shell command in the harness sandbox. Unlike `session.shell()`, this call is **not** recorded in any conversation transcript. Use it for setup, artifact extraction, or any shell work the model shouldn't see.
+
+```typescript
+await harness.shell('npm install', { cwd: '/workspace/project' });
+const { stdout } = await harness.shell('cat /workspace/result.json');
+```
+
+<ParamField path="command" type="string" required>
+  Shell command to execute.
+</ParamField>
+
+<ParamField path="options.cwd" type="string">
+  Working directory for the command.
+</ParamField>
+
+<ParamField path="options.env" type="Record<string, string>">
+  Additional environment variables.
+</ParamField>
+
+<ParamField path="options.signal" type="AbortSignal">
+  Cancel the in-flight command.
+</ParamField>
+
+Returns `CallHandle<ShellResult>`.
+
+## FlueSessions
+
+Explicit session management. Access via `harness.sessions`.
+
+### `sessions.get(name?, options?)`
+
+Load an existing session. **Throws** if the session does not exist.
+
+```typescript
+const session = await harness.sessions.get('review-thread');
+```
+
+### `sessions.create(name?, options?)`
+
+Create a new session. **Throws** if a session with that name already exists.
+
+```typescript
+const fresh = await harness.sessions.create('new-branch');
+```
+
+### `sessions.delete(name?)`
+
+Delete a session's stored conversation state. No-op if the session does not exist.
+
+```typescript
+await harness.sessions.delete('old-thread');
+```
+
+## FlueFs
+
+The `fs` object on both `FlueHarness` and `FlueSession` exposes the sandbox filesystem for out-of-band reads and writes.
+
+```typescript
+// Stage a config file before prompting
+await harness.fs.writeFile('/workspace/config.json', JSON.stringify({ rules: [] }));
+
+// Read an artifact the agent produced
+const result = await harness.fs.readFile('/workspace/output.md');
+```
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `readFile` | `(path) → Promise<string>` | Read a UTF-8 file. Throws if missing. |
+| `readFileBuffer` | `(path) → Promise<Uint8Array>` | Read raw bytes. |
+| `writeFile` | `(path, content) → Promise<void>` | Write string or bytes. Creates if missing, replaces if present. |
+| `stat` | `(path) → Promise<FileStat>` | File metadata: `isFile`, `isDirectory`, `isSymbolicLink`, `size`, `mtime`. |
+| `readdir` | `(path) → Promise<string[]>` | List directory entry names (not full paths). |
+| `exists` | `(path) → Promise<boolean>` | Returns `true` if path exists. Never throws. |
+| `mkdir` | `(path, options?) → Promise<void>` | Create directory. Pass `{ recursive: true }` for `mkdir -p`. |
+| `rm` | `(path, options?) → Promise<void>` | Remove file or directory. Pass `{ recursive: true, force: true }` as needed. |
+
+## CallHandle
+
+All methods that return `CallHandle<T>` are awaitable and cancellable.
+
+```typescript
+const handle = harness.shell('long-running-command');
+
+// Abort after 5 seconds
+setTimeout(() => handle.abort('timeout'), 5000);
+
+const result = await handle; // resolves or rejects with AbortError
+```
+
+<ResponseField name="signal" type="AbortSignal">
+  Fires when the call is aborted, whether via `handle.abort()` or an `options.signal` passed at call time.
+</ResponseField>
+
+<ResponseField name="abort" type="(reason?) => void">
+  Cancel the in-flight call. The awaited promise rejects with an `AbortError`.
+</ResponseField>
+
+## ShellResult
+
+Returned by `harness.shell()` and `session.shell()`.
+
+<ResponseField name="stdout" type="string">
+  Standard output of the command.
+</ResponseField>
+
+<ResponseField name="stderr" type="string">
+  Standard error of the command.
+</ResponseField>
+
+<ResponseField name="exitCode" type="number">
+  Exit code. `0` indicates success.
+</ResponseField>

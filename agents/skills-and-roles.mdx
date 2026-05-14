@@ -1,0 +1,199 @@
+---
+title: "Skills and roles: guiding agent behavior"
+description: "Learn how to use Flue roles (system prompt overlays) and skills (reusable task instructions) to shape and guide your agent's behavior."
+---
+
+Flue gives you two complementary tools for guiding agent behavior: **roles** shape *how* the model behaves, and **skills** describe *what* task it should perform.
+
+## Roles
+
+A role is a Markdown file in `.flue/roles/<name>.md` (or `roles/<name>.md` in the bare layout). Roles provide system prompt overlays that adjust the model's behavior for a specific call — changing its persona, focus, or reasoning effort.
+
+### Role file format
+
+```markdown
+---
+description: A meticulous auditor that thinks carefully before answering
+thinkingLevel: high
+---
+
+## Mission
+
+You are a meticulous auditor. Reason carefully before answering. Be precise,
+identify edge cases, and flag any inconsistencies. Keep responses concise but
+back claims with explicit reasoning.
+```
+
+Role frontmatter fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `description` | `string` | Human-readable summary of what this role does. |
+| `model` | `string` | Override the model when this role is active. Format: `'provider/model-id'`. |
+| `thinkingLevel` | `'off' \| 'low' \| 'medium' \| 'high'` | Override reasoning effort when this role is active. |
+
+The body of the file is sent to the model as a call-scoped system prompt overlay.
+
+### Using roles
+
+Roles can be set at the harness level, session level, or per call. The most specific setting wins: call > session > harness.
+
+```typescript
+// Harness-wide default
+const harness = await init({ model: 'anthropic/claude-haiku-4-5', role: 'coder' });
+
+// Session-level override
+const session = await harness.session('review-thread', { role: 'reviewer' });
+
+// Per-call override — beats both session and harness
+const { data } = await session.prompt('Review this diff.', { role: 'auditor' });
+```
+
+Role instructions are applied as **call-scoped system prompt overlays**. They are not injected into the persisted message history. Switching roles between calls does not pollute the conversation transcript.
+
+### `thinkingLevel` precedence with roles
+
+A role's `thinkingLevel` sits between the harness default and a per-call override:
+
+```typescript
+// Harness: low by default (fast, cheap)
+const harness = await init({
+  model: 'anthropic/claude-haiku-4-5',
+  thinkingLevel: 'low',
+});
+const session = await harness.session();
+
+// Role (auditor.md has thinkingLevel: high) overrides the harness default
+const careful = await session.prompt('Is 1009 prime? Justify briefly.', {
+  role: 'auditor',
+  result: v.object({ answer: v.string() }),
+});
+
+// Per-call override beats both the harness default and the role
+const minimal = await session.prompt('Echo back: hello', {
+  role: 'auditor',
+  thinkingLevel: 'minimal',
+  result: v.object({ answer: v.string() }),
+});
+```
+
+## Skills
+
+A skill is a Markdown file at `.agents/skills/<name>/SKILL.md`. Skills are reusable task instructions — they tell the model what to do and how, rather than how to behave generally.
+
+### Skill file format
+
+```markdown
+---
+name: greet
+description: Generate a personalized greeting for a given name. Use when asked to greet someone.
+---
+
+Given the name provided in the arguments, generate a warm, personalized greeting. Keep it to one or two sentences.
+```
+
+Skill frontmatter fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | `string` | The skill name used with `session.skill(name, ...)`. |
+| `description` | `string` | Tells the model when and how to invoke this skill. |
+
+The body of the file is the task instruction. The model reads the skill file from disk at call time via its filesystem tools — you can edit skill files mid-session without reinitializing the agent.
+
+### Using skills
+
+Call `session.skill()` with the skill's `name` from its frontmatter, or by relative path under `.agents/skills/`:
+
+```typescript
+// By frontmatter name
+const { data } = await session.skill('greet', {
+  args: { name: payload.name ?? 'World' },
+  result: v.object({ greeting: v.string() }),
+});
+
+// By path — useful for skill packs with multiple stages
+const { data } = await session.skill('triage/reproduce.md', {
+  args: { issueNumber: payload.issueNumber },
+  result: v.object({
+    severity: v.picklist(['low', 'medium', 'high', 'critical']),
+    reproducible: v.boolean(),
+    summary: v.string(),
+    fix_applied: v.boolean(),
+  }),
+});
+```
+
+### `skill()` options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `args` | `Record<string, unknown>` | Arguments passed into the skill. The model receives them as part of the task context. |
+| `result` | `valibot schema` | Parse and validate the model's output as structured JSON. Returns `{ data }`. |
+| `role` | `string` | Override the role for this skill call. |
+| `model` | `string` | Override the model for this skill call. |
+| `thinkingLevel` | `ThinkingLevel` | Override reasoning effort for this skill call. |
+| `tools` | `ToolDef[]` | Additional tools scoped to this skill call. |
+| `images` | `PromptImage[]` | Images attached to the skill's user message. Requires a vision-capable model. |
+| `signal` | `AbortSignal` | Cancel this call. |
+
+<Tabs>
+  <Tab title="Role file">
+    ```markdown
+    ---
+    description: A friendly greeter that welcomes users with enthusiasm
+    ---
+
+    ## Mission
+
+    You are the official greeter. Your job is to welcome users warmly
+    and make them feel appreciated. Always be enthusiastic and positive.
+
+    When greeting someone, include their name if provided and add a
+    fun fact or encouraging message.
+    ```
+
+    Place this at `.flue/roles/greeter.md`. Reference it with `role: 'greeter'`.
+  </Tab>
+  <Tab title="Skill file">
+    ```markdown
+    ---
+    name: greet
+    description: Generate a personalized greeting for a given name. Use when asked to greet someone.
+    ---
+
+    Given the name provided in the arguments, generate a warm, personalized greeting. Keep it to one or two sentences.
+    ```
+
+    Place this at `.agents/skills/greet/SKILL.md`. Reference it with `session.skill('greet', ...)`.
+  </Tab>
+</Tabs>
+
+## `AGENTS.md` — the agent's system prompt
+
+`AGENTS.md` is a Markdown file at the root of the working directory inside the sandbox. It acts as a persistent, agent-wide system prompt — describing who the agent is and how it should behave across all calls.
+
+```markdown
+# Assistant
+
+You are Assistant, an internal assistant. You receive task requests via chat.
+Your job is to complete the task autonomously and return a concise summary.
+
+## Behavior
+
+- Work autonomously. Never ask clarifying questions.
+- After completing the task, respond with a clear, concise summary.
+```
+
+## Context discovery
+
+When you call `init({ cwd })`, Flue discovers `AGENTS.md` and `.agents/skills/` from that directory. If no `cwd` is passed, Flue uses the sandbox's default working directory.
+
+```typescript
+const harness = await init({
+  model: 'anthropic/claude-sonnet-4-6',
+  cwd: '/workspace/project',   // discovers /workspace/project/AGENTS.md
+});                              // and /workspace/project/.agents/skills/
+```
+
+Tasks also discover their own context independently. When you call `session.task('...', { cwd: '/workspace/project' })`, the child agent reads `AGENTS.md` and skills from that working directory — not from the parent session's context.

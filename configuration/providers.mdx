@@ -1,0 +1,187 @@
+---
+title: 'Configuring AI model providers in Flue'
+description: 'Route model traffic through custom endpoints, enterprise gateways, or self-hosted providers using configureProvider and registerProvider.'
+---
+
+Flue uses `'provider/model-id'` strings to identify models:
+
+```typescript
+init({ model: 'anthropic/claude-sonnet-4-6' })
+init({ model: 'openai/gpt-4.1-mini' })
+```
+
+Providers come from [pi-ai](https://github.com/earendil-works/pi-ai)'s registry. API keys are read from environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.) by default. Use `configureProvider` or `registerProvider` in `app.ts` when you need to override endpoints, inject custom headers, or add providers that pi-ai doesn't ship.
+
+## Provider precedence
+
+Model resolution follows this precedence from highest to lowest:
+
+1. **Call-level** — `model` passed to `prompt()`, `skill()`, or `task()`
+2. **Role-level** — `model` set in the role definition
+3. **Harness-level** — `model` passed to `init()`
+
+Provider configuration (base URL, headers, API key) applies to every call that resolves a model through that provider.
+
+## `configureProvider`
+
+Patch transport-level settings on a built-in provider without replacing its catalog metadata (context window, cost table, token limits). Common uses include enterprise API gateways, audit logging proxies, traffic routing, and managed credentials.
+
+Import from `@flue/runtime/app`:
+
+```typescript
+import { configureProvider } from '@flue/runtime/app';
+```
+
+<Warning>
+Call `configureProvider` inside the `fetch()` handler of your `app.ts`, not at module level. On Cloudflare Workers, module-level code runs once per isolate and env bindings aren't available yet. In `fetch()`, bindings like `env.ANTHROPIC_BASE_URL` are resolved per-request.
+</Warning>
+
+```typescript .flue/app.ts
+import { configureProvider, flue } from '@flue/runtime/app';
+
+export default {
+  fetch(req, env, ctx) {
+    configureProvider('anthropic', {
+      baseUrl: env.ANTHROPIC_BASE_URL,
+      headers: { 'X-Custom-Auth': env.GATEWAY_KEY },
+      // Use a synthetic key when the proxy manages auth itself.
+      apiKey: 'dummy',
+    });
+
+    return flue().fetch(req, env, ctx);
+  },
+};
+```
+
+### Settings
+
+<ParamField path="baseUrl" type="string">
+  Override the provider's API endpoint. Use this to point at an enterprise gateway, a regional endpoint, or a self-hosted OpenAI-compatible server.
+</ParamField>
+
+<ParamField path="headers" type="object">
+  Extra headers merged into every outgoing request for this provider. Useful for gateway-specific authentication headers (`X-Custom-Auth`, `X-Api-Key`, etc.).
+</ParamField>
+
+<ParamField path="apiKey" type="string">
+  Override the API key for this provider. Pass `'dummy'` when your proxy or gateway manages authentication and the underlying model server doesn't require a real key.
+</ParamField>
+
+<ParamField path="storeResponses" type="boolean">
+  Sends `store: true` on OpenAI Responses API requests. Only enable this when you need OpenAI-hosted item persistence and accept its data retention policy.
+</ParamField>
+
+## `registerProvider`
+
+Register a brand-new provider prefix that Flue doesn't know about. Use this for self-hosted OpenAI-compatible servers (Ollama, LM Studio, vLLM, etc.), custom inference infrastructure, or Cloudflare Workers AI.
+
+Import from `@flue/runtime/app`:
+
+```typescript
+import { registerProvider } from '@flue/runtime/app';
+```
+
+Models then resolve as `'<name>/model-id'`:
+
+```typescript
+init({ model: 'ollama/llama3.2' })
+init({ model: 'lmstudio/mistral-7b' })
+```
+
+### HTTP providers
+
+Register any OpenAI-compatible (or other pi-ai `api`-compatible) endpoint:
+
+```typescript .flue/app.ts
+import { registerProvider, flue } from '@flue/runtime/app';
+
+// Register at module level — no env bindings needed.
+registerProvider('ollama', {
+  api: 'openai-completions',
+  baseUrl: 'http://localhost:11434/v1',
+});
+
+registerProvider('lmstudio', {
+  api: 'openai-completions',
+  baseUrl: 'http://localhost:1234/v1',
+});
+
+export default {
+  fetch: flue().fetch,
+};
+```
+
+<ParamField path="api" type="string" required>
+  The pi-ai wire-protocol handler to use. Use `'openai-completions'` for any OpenAI-compatible endpoint. Use `'anthropic'`, `'google-gemini'`, etc. for other supported protocols.
+</ParamField>
+
+<ParamField path="baseUrl" type="string" required>
+  The endpoint root (e.g. `'http://localhost:11434/v1'`).
+</ParamField>
+
+<ParamField path="apiKey" type="string">
+  Optional API key. Falls back to pi-ai's normal environment variable lookup if unset. Pass a dummy value if the server doesn't require authentication.
+</ParamField>
+
+<ParamField path="headers" type="object">
+  Default headers sent on every request routed through this provider.
+</ParamField>
+
+<ParamField path="contextWindow" type="number">
+  Default context window size in tokens for every model resolved through this registration. Overridden per-model via `models`. Defaults to `0` (unknown) when unset — compaction's threshold trigger is disabled for unknown window sizes.
+</ParamField>
+
+<ParamField path="maxTokens" type="number">
+  Default maximum output tokens for every model resolved through this registration. Overridden per-model via `models`.
+</ParamField>
+
+<ParamField path="models" type="object">
+  Per-model overrides for `contextWindow` and `maxTokens`, keyed by model id. Useful when a self-hosted server hosts multiple models with different limits.
+</ParamField>
+
+### Cloudflare Workers AI
+
+On the Cloudflare target, `cloudflare/...` model strings route through `env.AI.run()` — no API key required. The `cloudflare` prefix is registered automatically when you have `"ai": { "binding": "AI" }` in your `wrangler.jsonc`.
+
+```typescript
+// In any agent on the Cloudflare target:
+init({ model: 'cloudflare/@cf/moonshotai/kimi-k2.6' })
+```
+
+To customize the AI Gateway, register `cloudflare` yourself in `app.ts` before the auto-registration runs:
+
+```typescript .flue/app.ts
+import { registerProvider, flue } from '@flue/runtime/app';
+import { env } from 'cloudflare:workers';
+
+registerProvider('cloudflare', {
+  api: 'cloudflare-ai-binding',
+  binding: env.AI,
+  gateway: {
+    id: 'my-gateway',
+    cacheTtl: 3360,
+  },
+});
+
+export default { fetch: flue().fetch };
+```
+
+Pass `gateway: false` to opt out of the gateway entirely. Using `cloudflare/...` model strings with `--target node` raises a clear error.
+
+### `registerApiProvider` shorthand
+
+If you need to register a completely new wire-protocol handler (not just a new endpoint for an existing protocol), use `registerApiProvider` first, then `registerProvider`:
+
+```typescript
+import { registerApiProvider, registerProvider } from '@flue/runtime/app';
+
+registerApiProvider({ api: 'my-protocol', stream, streamSimple });
+
+registerProvider('my-provider', {
+  api: 'my-protocol',
+  baseUrl: 'https://api.example.com/v1',
+  apiKey: process.env.MY_API_KEY,
+});
+```
+
+`registerApiProvider` is a direct re-export of pi-ai's function. Calling it with the same `api` string overwrites the previous registration, so you can safely call it on every isolate boot.

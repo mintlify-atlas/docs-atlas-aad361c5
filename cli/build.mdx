@@ -1,0 +1,82 @@
+---
+title: '`flue build` — production artifact builder'
+description: 'flue build compiles your Flue project into a deployable artifact in ./dist — a single Node.js bundle or a Cloudflare Workers entry point.'
+---
+
+`flue build` compiles your project into a deployable artifact. It does not start a server or invoke any agent — it only produces the build output. Use it when you want to produce a release artifact for deployment, separate from any invocation.
+
+## Usage
+
+```bash
+flue build [--target <node|cloudflare>] [--root <path>] [--output <path>] [--config <path>]
+```
+
+## Flags
+
+<ParamField path="--target" type="string">
+  Build target. Accepted values: `node` or `cloudflare`. Required if not set in `flue.config.*`.
+</ParamField>
+
+<ParamField path="--root" type="string" default="cwd">
+  Project root directory. Source files (`agents/`, `roles/`) live at `<root>/.flue/` if that directory exists, otherwise at `<root>/` directly. Defaults to the current working directory.
+</ParamField>
+
+<ParamField path="--output" type="string" default="<root>/dist">
+  Where build artifacts are written. Defaults to `<root>/dist`.
+</ParamField>
+
+<ParamField path="--config" type="string">
+  Explicit path to a `flue.config.{ts,mts,mjs,js,cjs,cts}` file (relative to cwd). Defaults to auto-discovery from the root directory. CLI flags always override values set in the config file.
+</ParamField>
+
+## Build outputs
+
+### Node target
+
+Produces a single bundled ESM file at `dist/server.mjs`. All Flue infrastructure is inlined; your project's direct dependencies are externalized and resolved at runtime from `node_modules`.
+
+```
+dist/
+├── server.mjs        # self-contained server bundle
+├── server.mjs.map    # source map
+└── manifest.json     # agent list with trigger metadata
+```
+
+Run the server directly with Node:
+
+```bash
+node dist/server.mjs
+```
+
+### Cloudflare target
+
+Produces an unbundled TypeScript entry that Wrangler bundles at deploy time. This matches the same path that `flue dev --target cloudflare` uses, so what works in development will work in production.
+
+```
+dist/
+├── _entry.ts         # generated Cloudflare Worker entry point
+├── wrangler.jsonc    # merged Wrangler config with Durable Object bindings
+└── manifest.json     # agent list with trigger metadata
+```
+
+Flue automatically merges the required Durable Object bindings and `nodejs_compat` compatibility flags into your `wrangler.jsonc`. Deploy with:
+
+```bash
+wrangler deploy
+```
+
+## Examples
+
+```bash
+# Build for Node.js
+flue build --target node
+
+# Build for Cloudflare
+flue build --target cloudflare
+
+# Build with a custom project root
+flue build --target cloudflare --root ./my-app
+
+# Write output to a non-default directory
+flue build --target node --output ./build
+```

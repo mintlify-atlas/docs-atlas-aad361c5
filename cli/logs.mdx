@@ -1,0 +1,118 @@
+---
+title: '`flue logs` — stream and replay run events'
+description: 'flue logs tails live run events or replays the persisted event history for any completed run. Read-only — it never invokes the agent.'
+---
+
+`flue logs` lets you observe what an agent did during a run. It can tail a live run in real time or replay the persisted event history for a completed run. It is read-only and never invokes the agent.
+
+## Usage
+
+```bash
+flue logs <runId> [--server <url>] [--follow|-f|--no-follow] [--since <eventIndex>] [--types a,b,c] [--limit <n>] [--format pretty|json|ndjson]
+```
+
+## Getting the run ID
+
+The run ID is available in two places:
+
+- The `x-flue-run-id` response header on any POST to `/agents/<name>/<id>`
+- The `run_start` event in the SSE stream: `{ "type": "run_start", "runId": "..." }`
+
+When you use `flue run`, the run ID is also printed to stderr: `[flue] Run ID: <runId>`.
+
+## Flags
+
+<ParamField path="runId" type="string" required>
+  Run ID to observe. Positional argument. Obtain it from the `x-flue-run-id` response header or from the `run_start` event.
+</ParamField>
+
+<ParamField path="--server" type="string" default="http://127.0.0.1:3583">
+  Base URL of the running Flue server. Defaults to `http://127.0.0.1:3583` — the default address for `flue dev`.
+</ParamField>
+
+<ParamField path="--follow / -f" type="boolean">
+  Keep streaming live events after any buffered history has been replayed. Mutually exclusive with `--no-follow`. By default (neither flag set), `flue logs` automatically follows if the run is still active and exits if it is already complete.
+</ParamField>
+
+<ParamField path="--no-follow" type="boolean">
+  Replay persisted events and exit immediately. Does not open a live stream.
+</ParamField>
+
+<ParamField path="--since" type="number">
+  Event index to start streaming from. Treated as `Last-Event-ID` on the SSE stream. Use this to resume from a known offset without replaying earlier events.
+</ParamField>
+
+<ParamField path="--types" type="string">
+  Comma-separated list of event types to include. Events of other types are silently discarded. Example: `tool_call,log,run_end`.
+</ParamField>
+
+<ParamField path="--limit" type="number">
+  Maximum number of events to emit before exiting. Applies to both one-shot and streaming modes.
+</ParamField>
+
+<ParamField path="--format" type="string" default="pretty">
+  Output format. Accepted values:
+
+  - **`pretty`** (default) — Human-readable output to stderr, matching the format used by `flue run`.
+  - **`json`** — One JSON object per line, written to stdout.
+  - **`ndjson`** — Newline-delimited JSON, written to stdout. Identical to `json` in current behavior.
+</ParamField>
+
+## Auto-follow mode
+
+When neither `--follow` nor `--no-follow` is set, `flue logs` queries the server for the run's current status:
+
+- If the run is **active**, it opens a live SSE stream and follows until the run ends or you press Ctrl+C.
+- If the run is **completed** or **errored**, it replays the persisted event history and exits.
+
+## Event types
+
+The following event types may appear in the stream:
+
+| Type | Description |
+|------|-------------|
+| `run_start` | Run has begun. Contains `runId` and `agentName`. |
+| `run_end` | Run has completed. Contains `durationMs` and `result` (or `error`). |
+| `text_delta` | Incremental text output from the model. |
+| `thinking_start` | Model has begun a thinking block. |
+| `thinking_delta` | Incremental thinking content. |
+| `thinking_end` | Thinking block complete. |
+| `tool_start` | Tool invocation has started. Contains `toolName` and `args`. |
+| `tool_call` | Tool invocation has finished. Contains result or error. |
+| `turn` | One LLM round-trip has completed. |
+| `operation_start` | A prompt, skill, or task call has started. |
+| `operation` | A prompt, skill, or task call has completed. |
+| `compaction_start` | Context compaction has started. Contains `reason` and `estimatedTokens`. |
+| `compaction` | Context compaction complete. Contains message count before and after. |
+| `log` | Structured log message from the agent runtime. Contains `level` and `message`. |
+| `idle` | Agent is waiting (between turns or operations). |
+
+## Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `2` | The run ended with an error (`run_end.isError === true`) |
+| `130` | Interrupted by Ctrl+C |
+
+## Examples
+
+```bash
+# Tail a specific run (auto-follow mode)
+flue logs run_01H...
+
+# One-shot replay and exit
+flue logs run_01H... --no-follow
+
+# Filter to specific event types and output as JSON
+flue logs run_01H... --types tool_call,log,run_end --format json
+
+# Follow a run on a non-default server
+flue logs run_01H... --server http://my-flue-server:3583 --follow
+
+# Replay from a known event index
+flue logs run_01H... --since 42 --no-follow
+
+# Cap at the first 10 events
+flue logs run_01H... --limit 10 --no-follow
+```

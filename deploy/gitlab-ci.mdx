@@ -1,0 +1,310 @@
+---
+title: 'Run Flue agents in GitLab CI/CD'
+description: 'Invoke Flue agents from GitLab CI/CD pipelines using flue run. Trigger on issue events, merge requests, or schedules without an HTTP endpoint.'
+---
+
+Run Flue agents inside GitLab CI/CD pipelines. This pattern is for CI agents that run in response to pipeline events — an issue opened, a merge request created, a scheduled job — without needing a deployed HTTP server.
+
+The key command is `flue run`:
+
+```bash
+npx flue run <agent> --target node --id <id> --payload '<json>'
+```
+
+It builds your project, invokes the agent once, streams progress to stderr, prints the final result as JSON to stdout, and exits.
+
+## When to use this pattern
+
+- You want an agent to run automatically when a GitLab event fires
+- The agent needs access to the runner's filesystem, `git`, `glab`, or other CLI tools
+- You don't need a persistent HTTP endpoint — just a one-shot invocation per event
+
+For a long-running HTTP server, see [Deploy to Node.js](/deploy/node).
+
+## Project setup
+
+<Steps>
+  <Step title="Create the project">
+    ```bash
+    mkdir my-flue-project && cd my-flue-project
+    npm init -y
+    npm install @flue/runtime valibot
+    npm install -D @flue/cli
+    ```
+  </Step>
+
+  <Step title="Create a CI agent">
+    CI agents use `triggers = {}` — no HTTP endpoint is created in the deployed build. The CLI can still invoke them with `flue run`.
+
+    ```typescript
+    // .flue/agents/hello.ts
+    import type { FlueContext } from '@flue/runtime';
+    import { local } from '@flue/runtime/node';
+    import * as v from 'valibot';
+
+    export const triggers = {};
+
+    export default async function ({ init, payload }: FlueContext) {
+      const harness = await init({
+        sandbox: local(),
+        model: 'anthropic/claude-sonnet-4-6',
+      });
+      const session = await harness.session();
+
+      const { data } = await session.prompt(
+        `Say hello to ${payload.name ?? 'the user'} and share an interesting fact.`,
+        {
+          result: v.object({
+            greeting: v.string(),
+            fact: v.string(),
+          }),
+        },
+      );
+
+      return data;
+    }
+    ```
+
+    `local()` runs the agent directly against the runner's filesystem and shell. Anything on `$PATH` — `glab`, `git`, `npm` — is reachable from the agent's bash tool. By default only shell-essential env vars (`PATH`, `HOME`, locale, etc.) are inherited; pass `local({ env: { GITLAB_TOKEN: process.env.GITLAB_TOKEN } })` to expose specific secrets.
+  </Step>
+
+  <Step title="Test it locally">
+    ```bash
+    npx flue run hello --target node --id test-1 \
+      --payload '{"name": "World"}'
+    ```
+
+    Use `flue run` during development to iterate fast — no deployment needed.
+  </Step>
+
+  <Step title="Add the pipeline">
+    ```yaml
+    # .gitlab-ci.yml
+    hello:
+      image: node:22
+      rules:
+        - if: $CI_PIPELINE_SOURCE == "trigger" && $ISSUE_ACTION == "open"
+      before_script:
+        - npm ci
+      script:
+        - |
+          npx flue run hello --target node \
+            --id "hello-$ISSUE_IID" \
+            --payload "{\"name\": \"$ISSUE_AUTHOR\"}"
+    ```
+
+    Add `ANTHROPIC_API_KEY` as a CI/CD variable at **Settings > CI/CD > Variables** (masked).
+  </Step>
+</Steps>
+
+## Triggering pipelines from issue events
+
+GitLab doesn't pass issue data into CI variables automatically. You need a [pipeline trigger](https://docs.gitlab.com/ee/ci/triggers/) to bridge the gap.
+
+<Steps>
+  <Step title="Create a pipeline trigger token">
+    Go to **Settings > CI/CD > Pipeline trigger tokens** and create a token.
+  </Step>
+
+  <Step title="Add a project webhook">
+    Go to **Settings > Webhooks** and add a webhook that fires on **Issue events**. Point it at a small relay that calls the trigger API with the right variables:
+
+    ```typescript
+    // Deploy this as a serverless function or lightweight server
+    async function handleGitLabWebhook(event) {
+      const { object_kind, object_attributes, issue } = event;
+      let variables: Record<string, string> = {};
+
+      if (object_kind === 'issue') {
+        variables = {
+          ISSUE_ACTION: object_attributes.action,
+          ISSUE_IID: String(object_attributes.iid),
+          ISSUE_AUTHOR: object_attributes.author?.username ?? '',
+        };
+      } else if (object_kind === 'note' && issue) {
+        variables = {
+          ISSUE_ACTION: 'note',
+          ISSUE_IID: String(issue.iid),
+        };
+      } else {
+        return;
+      }
+
+      await fetch(`${GITLAB_URL}/api/v4/projects/${PROJECT_ID}/trigger/pipeline`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: TRIGGER_TOKEN, ref: 'main', variables }),
+      });
+    }
+    ```
+  </Step>
+</Steps>
+
+## Building a real agent
+
+Here is a complete issue triage agent that reads issues with `glab`, assesses severity, and optionally applies a fix.
+
+### The agent
+
+```typescript
+// .flue/agents/triage.ts
+import { type FlueContext } from '@flue/runtime';
+import { local } from '@flue/runtime/node';
+import * as v from 'valibot';
+
+export const triggers = {};
+
+export default async function ({ init, payload }: FlueContext) {
+  const harness = await init({
+    sandbox: local({
+      // Explicitly forward the runner's secrets into the agent's shell.
+      // Anything not listed here (including ANTHROPIC_API_KEY) stays on
+      // the host and is invisible to the model's bash tool.
+      env: { GITLAB_TOKEN: process.env.GITLAB_TOKEN },
+    }),
+    model: 'anthropic/claude-opus-4-7',
+  });
+  const session = await harness.session();
+
+  const { data } = await session.skill('triage', {
+    args: {
+      issueIid: payload.issueIid,
+      projectId: payload.projectId,
+    },
+    result: v.object({
+      severity: v.picklist(['low', 'medium', 'high', 'critical']),
+      reproducible: v.boolean(),
+      summary: v.string(),
+      fix_applied: v.boolean(),
+    }),
+  });
+
+  return data;
+}
+```
+
+### The skill
+
+```markdown
+---
+name: triage
+description: Triage a GitLab issue — reproduce, assess severity, and optionally fix.
+---
+
+Given the issue IID and project ID in the arguments:
+
+1. Use `glab issue view <iid>` to fetch the issue details
+2. Read the codebase to understand the relevant area
+3. Attempt to reproduce the issue
+4. Assess severity and write a summary
+5. If the fix is straightforward, apply it and push a branch
+```
+
+Save this as `.agents/skills/triage/SKILL.md`. It is discovered automatically from `process.cwd()` when using `local()`.
+
+### The pipeline
+
+```yaml
+# .gitlab-ci.yml
+triage:
+  image: node:22
+  timeout: 30 minutes
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "trigger" && $ISSUE_ACTION == "open"
+  before_script:
+    - npm ci
+  script:
+    - |
+      npx flue run triage --target node \
+        --id "triage-$ISSUE_IID" \
+        --payload "{\"issueIid\": $ISSUE_IID, \"projectId\": \"$CI_PROJECT_ID\"}"
+```
+
+Add these as CI/CD variables at **Settings > CI/CD > Variables** (masked):
+
+| Variable | Description |
+| --- | --- |
+| `ANTHROPIC_API_KEY` | API key for your LLM provider |
+| `GITLAB_API_TOKEN` | Project or personal access token with `api` scope |
+
+## Passing GitLab context to your agent
+
+Variables set in the pipeline trigger are available as environment variables in the job. Pass them to the agent via `--payload`:
+
+```yaml
+script:
+  - |
+    npx flue run triage --target node \
+      --id "triage-$ISSUE_IID" \
+      --payload "{\"issueIid\": $ISSUE_IID, \"projectId\": \"$CI_PROJECT_ID\"}"
+```
+
+Built-in CI variables like `$CI_PROJECT_ID`, `$CI_COMMIT_SHA`, and `$CI_MERGE_REQUEST_IID` are available directly in the script and can be injected into the payload.
+
+## Typed results and orchestration
+
+Result schemas let you branch on the agent's output within a single run:
+
+```typescript
+import * as v from 'valibot';
+
+const { data } = await session.skill('triage', {
+  args: { issueIid: payload.issueIid },
+  result: v.object({
+    severity: v.picklist(['low', 'medium', 'high', 'critical']),
+    reproducible: v.boolean(),
+    summary: v.string(),
+  }),
+});
+
+if (data.severity === 'critical' && data.reproducible) {
+  await session.skill('auto-fix', {
+    args: { issueIid: payload.issueIid },
+    result: v.object({ fix_applied: v.boolean(), branch: v.optional(v.string()) }),
+  });
+}
+
+return data;
+```
+
+## flue run output
+
+`flue run` writes the agent's event stream to stderr and the final result to stdout. This means you can pipe the result to `jq` without capturing logs:
+
+```bash
+npx flue run triage --target node --id test-1 \
+  --payload '{"issueIid": 42, "projectId": "123"}' | jq '.severity'
+```
+
+## Secrets
+
+In GitLab CI, secrets set as masked variables are available as `process.env` in the job. Forward them explicitly into `local()` to make them visible to the agent's bash tool:
+
+```typescript
+sandbox: local({
+  env: {
+    GITLAB_TOKEN: process.env.GITLAB_TOKEN,
+  },
+})
+```
+
+Secrets not listed in `local({ env: ... })` — including your model API key — stay on the host and are never visible to the model's bash tool.
+
+## Scheduled pipelines
+
+Use GitLab's pipeline schedules (**Build > Pipeline schedules**) to run an agent on a cron schedule. The scheduled pipeline runs with the same CI/CD variables as other pipelines:
+
+```yaml
+# .gitlab-ci.yml
+weekly-report:
+  image: node:22
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+  before_script:
+    - npm ci
+  script:
+    - |
+      npx flue run report --target node \
+        --id "report-$(date +%Y%W)" \
+        --payload "{\"week\": \"$(date +%Y-%W)\"}"
+```

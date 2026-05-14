@@ -1,0 +1,302 @@
+---
+title: "Build a custom Flue sandbox connector"
+description: "Implement SandboxApi for any provider and wrap it in a SandboxFactory — a complete guide to building a custom connector from the spec."
+---
+
+Any sandbox provider can be connected to Flue by implementing the `SandboxApi` interface and wrapping it in a `SandboxFactory`. The result is a single TypeScript file you import directly into your agents.
+
+If you want to start from an AI-assisted build, pass the provider's docs URL to `flue add`:
+
+```bash
+flue add https://provider.dev --category sandbox | claude
+```
+
+The CLI fetches the [sandbox connector spec](https://raw.githubusercontent.com/withastro/flue/refs/heads/main/docs/sandbox-connector-spec.md) and pipes it to your agent along with the URL. The agent reads the spec, reads the provider docs, and builds a conformant connector from scratch. The rest of this page documents the spec directly so you can build or review a connector yourself.
+
+## The contract
+
+All imports come from `@flue/runtime` — never from internal runtime paths.
+
+### `SandboxApi` — you implement this
+
+```typescript
+export interface SandboxApi {
+  readFile(path: string): Promise<string>;
+  readFileBuffer(path: string): Promise<Uint8Array>;
+  writeFile(path: string, content: string | Uint8Array): Promise<void>;
+  stat(path: string): Promise<FileStat>;
+  readdir(path: string): Promise<string[]>;
+  exists(path: string): Promise<boolean>;
+  mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
+  rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
+  exec(
+    command: string,
+    options?: {
+      cwd?: string;
+      env?: Record<string, string>;
+      timeout?: number;
+      signal?: AbortSignal;
+    },
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }>;
+}
+```
+
+### `SandboxFactory` — your factory returns this
+
+```typescript
+export interface SandboxFactory {
+  createSessionEnv(options: { id: string; cwd?: string }): Promise<SessionEnv>;
+}
+```
+
+### `FileStat` — the return type for `stat()`
+
+```typescript
+export interface FileStat {
+  isFile: boolean;
+  isDirectory: boolean;
+  isSymbolicLink: boolean;
+  size: number;
+  mtime: Date;
+}
+```
+
+### `createSandboxSessionEnv` — wraps your api into a `SessionEnv`
+
+```typescript
+import { createSandboxSessionEnv } from '@flue/runtime';
+// createSandboxSessionEnv(api: SandboxApi, cwd: string): SessionEnv
+```
+
+You call this inside `createSessionEnv()`. You never implement `SessionEnv` methods yourself.
+
+## Complete connector template
+
+```typescript
+// .flue/connectors/<provider>.ts  (or ./connectors/<provider>.ts)
+import { createSandboxSessionEnv } from '@flue/runtime';
+import type {
+  SandboxApi,
+  SandboxFactory,
+  SessionEnv,
+  FileStat,
+} from '@flue/runtime';
+import type { Sandbox as ProviderSandbox } from '<provider-sdk>';
+
+class ProviderSandboxApi implements SandboxApi {
+  constructor(private sandbox: ProviderSandbox) {}
+
+  async readFile(path: string): Promise<string> {
+    // UTF-8 decode and return file contents
+  }
+
+  async readFileBuffer(path: string): Promise<Uint8Array> {
+    // Return raw bytes; if SDK gives a Buffer: new Uint8Array(buffer)
+  }
+
+  async writeFile(path: string, content: string | Uint8Array): Promise<void> {
+    // Accept both string and Uint8Array
+    // Convert string to UTF-8 bytes for SDKs that only accept buffers
+  }
+
+  async stat(path: string): Promise<FileStat> {
+    // Use sensible defaults if SDK doesn't expose mtime or size:
+    // new Date() and 0. isSymbolicLink: false is fine if SDK doesn't say.
+  }
+
+  async readdir(path: string): Promise<string[]> {
+    // Return entry names (not full paths)
+  }
+
+  async exists(path: string): Promise<boolean> {
+    try {
+      await this.sandbox.stat(path); // or equivalent
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async mkdir(path: string, options?: { recursive?: boolean }): Promise<void> {
+    if (options?.recursive) {
+      // Fall back to exec if the SDK lacks recursive mkdir
+      await this.exec(`mkdir -p '${path.replace(/'/g, "'\\''")}'`);
+      return;
+    }
+    await this.sandbox.mkdir(path);
+  }
+
+  async rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void> {
+    await this.sandbox.rm(path, options);
+  }
+
+  async exec(
+    command: string,
+    options?: { cwd?: string; env?: Record<string, string>; timeout?: number; signal?: AbortSignal },
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const result = await this.sandbox.execute(command, {
+      cwd: options?.cwd,
+      env: options?.env,
+      timeout: options?.timeout, // forward to provider's native timeout option
+      // Forward signal only if the provider SDK supports it
+    });
+    return {
+      stdout: result.stdout ?? '',
+      stderr: result.stderr ?? '',
+      exitCode: result.exitCode ?? 0,
+    };
+  }
+}
+
+export function provider(sandbox: ProviderSandbox): SandboxFactory {
+  return {
+    async createSessionEnv({ cwd }: { id: string; cwd?: string }): Promise<SessionEnv> {
+      const sandboxCwd = cwd ?? '/workspace'; // pick a sensible default for your provider
+      const api = new ProviderSandboxApi(sandbox);
+      return createSandboxSessionEnv(api, sandboxCwd);
+    },
+  };
+}
+```
+
+## Method implementation notes
+
+### `exec()` and cancellation
+
+`timeout` is the primary cancellation contract — always forward it to the provider SDK's native timeout option (E2B `timeoutMs`, Daytona `timeout`, etc.). When the deadline expires, return exit code `124` to match the convention used by `timeout(1)` and all other Flue connectors:
+
+```typescript
+// On timeout:
+return { stdout: '', stderr: 'command timed out', exitCode: 124 };
+```
+
+`signal` is optional. Forward it only if the provider SDK accepts an `AbortSignal` or similar cancellation primitive. Do not try to fake mid-flight cancellation with `Promise.race` against the signal — the underlying remote process will keep running, which surprises users. Flue's `createSandboxSessionEnv` wrapper already does pre/post `signal.aborted` checks, so connectors that can't observe a signal mid-flight still surface cancellation correctly.
+
+### `mkdir()` with `recursive`
+
+If your provider's SDK only creates single-level directories, fall back to `exec()` for the recursive case:
+
+```typescript
+async mkdir(path: string, options?: { recursive?: boolean }): Promise<void> {
+  if (options?.recursive) {
+    await this.exec(`mkdir -p '${path.replace(/'/g, "'\\''")}'`);
+    return;
+  }
+  await this.sandbox.createDir(path);
+}
+```
+
+### `exists()`
+
+Most provider SDKs throw on a missing path rather than returning a falsy value. Wrap in try/catch:
+
+```typescript
+async exists(path: string): Promise<boolean> {
+  try {
+    await this.sandbox.stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+```
+
+### `writeFile()` with both types
+
+Accept both `string` and `Uint8Array`. Convert to the type your provider expects:
+
+```typescript
+async writeFile(path: string, content: string | Uint8Array): Promise<void> {
+  if (typeof content === 'string') {
+    await this.sandbox.writeFile(path, content);
+  } else {
+    const ab = content.buffer.slice(
+      content.byteOffset,
+      content.byteOffset + content.byteLength,
+    ) as ArrayBuffer;
+    await this.sandbox.writeFile(path, ab);
+  }
+}
+```
+
+### `stat()` defaults
+
+If the provider doesn't expose `mtime` or `size`, use defaults. Symlinks are rare in sandbox providers:
+
+```typescript
+return {
+  isFile: !info.isDir,
+  isDirectory: info.isDir ?? false,
+  isSymbolicLink: false,
+  size: info.size ?? 0,
+  mtime: info.modTime ? new Date(info.modTime) : new Date(),
+};
+```
+
+## Sandbox lifetime
+
+<Warning>
+Connectors must not call `sandbox.delete()`, `sandbox.terminate()`, `sandbox.kill()`, or any equivalent. The user creates the sandbox and decides when to destroy it. Connectors are pure adapters — they do not manage lifecycle.
+</Warning>
+
+## Where to put the file
+
+Follow the same layout convention as the rest of your project:
+
+- **`.flue/` layout** — `./.flue/connectors/<name>.ts`
+- **Bare layout** — `./connectors/<name>.ts`
+
+If `.flue/` exists at the project root, use the `.flue/` location. If you can't tell, ask the user.
+
+## Building a connector step by step
+
+<Steps>
+  <Step title="Read the provider's SDK docs">
+    Find the SDK's methods for reading files, writing files, listing directories, and running shell commands. Most providers have direct analogues for most operations; for anything missing, you'll use `exec()` as a fallback.
+  </Step>
+  <Step title="Implement SandboxApi">
+    Create a class that implements every method in the `SandboxApi` interface. Use the template above as your starting point. Pay special attention to `exec()` timeout handling and `writeFile()` type conversion.
+  </Step>
+  <Step title="Write the factory function">
+    Wrap your `SandboxApi` implementation in a factory function that calls `createSandboxSessionEnv(api, cwd)` inside `createSessionEnv()`. Export the factory with a name that matches your provider.
+  </Step>
+  <Step title="Typecheck">
+    Run the project's typechecker to confirm the connector conforms to the interface:
+
+    ```bash
+    npx tsc --noEmit
+    ```
+  </Step>
+  <Step title="Install the provider SDK">
+    If the project doesn't already depend on the provider's SDK, install it:
+
+    ```bash
+    npm install <provider-sdk>
+    ```
+  </Step>
+  <Step title="Set environment variables">
+    Add any API keys or secrets the provider needs. Use `flue dev --env .env` or `flue run --env .env` to load them at runtime.
+  </Step>
+  <Step title="Wire it into an agent">
+    Import your factory and pass it to `init()`:
+
+    ```typescript
+    import { provider } from '../connectors/provider';
+
+    const sandbox = await providerClient.create();
+    const harness = await init({
+      sandbox: provider(sandbox),
+      model: 'anthropic/claude-sonnet-4-6',
+    });
+    const session = await harness.session();
+    ```
+  </Step>
+</Steps>
+
+## Reference implementation
+
+The Daytona connector is the reference implementation — a clean, complete example of every pattern described on this page: shell fallback for recursive `mkdir`, try/catch in `exists()`, and buffer/string conversion in `writeFile()`. Read the [Daytona connector](/connectors/daytona) page, or the raw source at:
+
+```
+https://raw.githubusercontent.com/withastro/flue/refs/heads/main/connectors/sandbox--daytona.md
+```

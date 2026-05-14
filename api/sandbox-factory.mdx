@@ -1,0 +1,291 @@
+---
+title: "SandboxFactory, SandboxApi, and tools reference"
+description: "Reference for SandboxFactory, SandboxApi, ToolDef, connectMcpServer, and the @flue/runtime/app exports used to extend and configure Flue agents."
+---
+
+This page documents the extension interfaces for Flue: sandbox connectors (`SandboxFactory`, `SandboxApi`), custom tools (`ToolDef`, `Type`, `createTools`), MCP integration (`connectMcpServer`), and the `@flue/runtime/app` exports for provider configuration and app composition.
+
+## SandboxFactory
+
+The interface your connector returns. Flue calls `createSessionEnv()` once per session.
+
+```typescript
+import { createSandboxSessionEnv } from '@flue/runtime';
+import type { SandboxFactory, SandboxApi, SessionEnv } from '@flue/runtime';
+
+export function myProvider(sdk: MySdk): SandboxFactory {
+  return {
+    async createSessionEnv({ id, cwd }): Promise<SessionEnv> {
+      const api = new MySandboxApi(sdk);
+      return createSandboxSessionEnv(api, cwd ?? '/workspace');
+    },
+  };
+}
+```
+
+<ParamField path="createSessionEnv" type="function" required>
+  Called once per session. Receives `{ id: string; cwd?: string }` and must return a `Promise<SessionEnv>`.
+</ParamField>
+
+## SandboxApi
+
+Implement this interface to build a custom connector. Pass it to `createSandboxSessionEnv()` to obtain a `SessionEnv`.
+
+```typescript
+class MySandboxApi implements SandboxApi {
+  constructor(private sdk: MySdk) {}
+
+  async exec(command, options) { /* ... */ }
+  async readFile(path) { /* ... */ }
+  async readFileBuffer(path) { /* ... */ }
+  async writeFile(path, content) { /* ... */ }
+  async stat(path) { /* ... */ }
+  async readdir(path) { /* ... */ }
+  async exists(path) { /* ... */ }
+  async mkdir(path, options) { /* ... */ }
+  async rm(path, options) { /* ... */ }
+}
+```
+
+### `exec(command, options?)`
+
+<ParamField path="command" type="string" required>Shell command to run.</ParamField>
+<ParamField path="options.cwd" type="string">Working directory.</ParamField>
+<ParamField path="options.env" type="Record<string, string>">Extra environment variables.</ParamField>
+<ParamField path="options.timeout" type="number">
+  Wall-clock deadline in seconds. **Primary cancellation contract** — always forward to the provider SDK's native timeout option. Return exit code `124` and a descriptive `stderr` on deadline expiry (matching the `timeout(1)` convention).
+</ParamField>
+<ParamField path="options.signal" type="AbortSignal">
+  Optional mid-flight cancellation. Forward only if the provider SDK has a real cancellation primitive. The runtime performs pre/post `signal.aborted` checks for you.
+</ParamField>
+
+Returns `Promise<{ stdout: string; stderr: string; exitCode: number }>`.
+
+### File methods
+
+| Method | Signature | Notes |
+|--------|-----------|-------|
+| `readFile` | `(path) → Promise<string>` | UTF-8 decode. |
+| `readFileBuffer` | `(path) → Promise<Uint8Array>` | Wrap Node `Buffer`: `new Uint8Array(buf)`. |
+| `writeFile` | `(path, content: string \| Uint8Array) → Promise<void>` | Accept both types. |
+| `stat` | `(path) → Promise<FileStat>` | Use `new Date()` and `0` for mtime/size if unavailable. |
+| `readdir` | `(path) → Promise<string[]>` | Entry names only, not full paths. |
+| `exists` | `(path) → Promise<boolean>` | Wrap in `try/catch`, return `false` on missing. |
+| `mkdir` | `(path, options?) → Promise<void>` | Fall back to `exec('mkdir -p ...')` for recursive case. |
+| `rm` | `(path, options?) → Promise<void>` | Honor `recursive` and `force`. |
+
+### FileStat
+
+<ResponseField name="isFile" type="boolean">True if the path is a regular file.</ResponseField>
+<ResponseField name="isDirectory" type="boolean">True if the path is a directory.</ResponseField>
+<ResponseField name="isSymbolicLink" type="boolean">True if the path is a symlink. `false` is acceptable if the SDK does not expose this.</ResponseField>
+<ResponseField name="size" type="number">File size in bytes. Use `0` if unavailable.</ResponseField>
+<ResponseField name="mtime" type="Date">Last modified time. Use `new Date()` if unavailable.</ResponseField>
+
+<Warning>
+Connectors must **never** call `.delete()`, `.terminate()`, `.kill()`, or any equivalent on the provider sandbox. Flue does not manage sandbox lifetime — the user owns what they create.
+</Warning>
+
+## BashFactory
+
+Alternative to `SandboxFactory` for custom just-bash configurations. Share an `InMemoryFs` instance across sessions to persist files.
+
+```typescript
+import { Bash, InMemoryFs } from 'just-bash';
+
+const fs = new InMemoryFs();
+
+const harness = await init({
+  sandbox: () => new Bash({ fs, cwd: '/workspace', python: true }),
+  model: 'anthropic/claude-sonnet-4-6',
+});
+```
+
+`BashFactory` is typed as `() => BashLike | Promise<BashLike>`. Called once at `init()` time.
+
+## ToolDef
+
+Define custom tools to extend the LLM's capabilities. Pass to `init({ tools })` for harness-wide availability, or to individual `prompt()`/`skill()`/`task()` calls for call-scoped tools.
+
+```typescript
+import { Type } from '@flue/runtime';
+
+const searchTool: ToolDef = {
+  name: 'search_kb',
+  description: 'Search the knowledge base for articles matching a query.',
+  parameters: Type.Object({
+    query: Type.String({ description: 'Search query' }),
+    limit: Type.Optional(Type.Number({ default: 5 })),
+  }),
+  async execute({ query, limit }, signal) {
+    const results = await kb.search(query, { limit: limit ?? 5, signal });
+    return JSON.stringify(results);
+  },
+};
+
+const harness = await init({
+  model: 'anthropic/claude-sonnet-4-6',
+  tools: [searchTool],
+});
+```
+
+<ParamField path="name" type="string" required>
+  Unique tool name. Must not conflict with built-in tool names (see `BUILTIN_TOOL_NAMES`).
+</ParamField>
+
+<ParamField path="description" type="string" required>
+  Tells the LLM when and how to use this tool.
+</ParamField>
+
+<ParamField path="parameters" type="TSchema | Record<string, unknown>" required>
+  JSON Schema-compatible parameter schema. Use `Type` from `@flue/runtime` for hand-written schemas, or pass schemas discovered from MCP adapters.
+</ParamField>
+
+<ParamField path="execute" type="(args, signal?) => Promise<string>" required>
+  Tool implementation. Returns a string sent back to the LLM. Thrown errors become tool errors.
+</ParamField>
+
+### `createTools(defs)` and `BUILTIN_TOOL_NAMES`
+
+```typescript
+import { createTools, BUILTIN_TOOL_NAMES } from '@flue/runtime';
+
+// Ensure no name conflicts with built-ins
+console.log(BUILTIN_TOOL_NAMES); // ['bash', 'read', 'write', 'edit', 'grep', 'glob', ...]
+
+const tools = createTools([searchTool, anotherTool]);
+```
+
+## connectMcpServer
+
+Connect to a remote MCP (Model Context Protocol) server and use its tools in your agent.
+
+```typescript
+import { connectMcpServer } from '@flue/runtime';
+
+const github = await connectMcpServer('github', {
+  url: 'https://mcp.github.com/mcp',
+  headers: { Authorization: `Bearer ${env.GITHUB_TOKEN}` },
+});
+
+try {
+  const harness = await init({
+    model: 'anthropic/claude-sonnet-4-6',
+    tools: github.tools,
+  });
+  const session = await harness.session();
+  return await session.prompt(payload.prompt);
+} finally {
+  await github.close();
+}
+```
+
+<ParamField path="name" type="string" required>
+  A local identifier for this MCP connection (used in logging).
+</ParamField>
+
+<ParamField path="options.url" type="string" required>
+  Remote MCP server URL.
+</ParamField>
+
+<ParamField path="options.headers" type="Record<string, string>">
+  Headers to send with every MCP request. Keep secrets in `env`, not in prompts or filesystem context.
+</ParamField>
+
+<ParamField path="options.transport" type="'http' | 'sse'">
+  Transport protocol. Defaults to `'http'` (streamable HTTP, the modern standard). Pass `'sse'` for legacy SSE-only servers.
+</ParamField>
+
+Returns `Promise<McpServerConnection>` with `tools: ToolDef[]` and `close(): Promise<void>`.
+
+<Note>
+Always call `connection.close()` in a `finally` block. Flue does not auto-detect transports, spawn stdio MCP servers, or handle OAuth callbacks.
+</Note>
+
+## `@flue/runtime/app` exports
+
+Import from `@flue/runtime/app` in your `app.ts` entry file.
+
+### `flue()`
+
+Returns a Hono sub-app that handles all Flue agent routing. Use when you need custom middleware or additional routes alongside your agents.
+
+```typescript
+// .flue/app.ts
+import { flue } from '@flue/runtime/app';
+import { Hono } from 'hono';
+
+const app = new Hono();
+app.use('*', myMiddleware());
+app.route('/', flue());
+export default app;
+```
+
+### `configureProvider(name, settings)`
+
+Set runtime transport settings for a provider. Call inside the `fetch()` handler in `app.ts` — not at module level, since Cloudflare Workers may share module state across requests.
+
+```typescript
+import { configureProvider, flue } from '@flue/runtime/app';
+
+export default {
+  fetch(req, env, ctx) {
+    configureProvider('anthropic', {
+      baseUrl: env.ANTHROPIC_BASE_URL,
+      headers: { 'X-Custom-Auth': env.GATEWAY_KEY },
+      apiKey: 'dummy',
+    });
+    return flue().fetch(req, env, ctx);
+  },
+};
+```
+
+<ParamField path="name" type="string" required>Provider name (e.g. `'anthropic'`, `'openai'`).</ParamField>
+<ParamField path="settings.baseUrl" type="string">Custom endpoint URL.</ParamField>
+<ParamField path="settings.headers" type="Record<string, string>">Extra headers merged into every request.</ParamField>
+<ParamField path="settings.apiKey" type="string">Override API key (useful for proxy/gateway scenarios).</ParamField>
+<ParamField path="settings.storeResponses" type="boolean">Send `store: true` for OpenAI Responses API.</ParamField>
+
+### `registerProvider(name, registration)`
+
+Register a custom or self-hosted provider.
+
+```typescript
+import { registerProvider } from '@flue/runtime/app';
+
+registerProvider('my-provider', {
+  api: 'openai-completions',
+  baseUrl: 'https://my-llm-proxy.internal/v1',
+  apiKey: process.env.MY_PROVIDER_KEY,
+});
+```
+
+### `observe(subscriber)`
+
+Subscribe to `FlueEvent` stream for monitoring, logging, or analytics.
+
+```typescript
+import { observe } from '@flue/runtime/app';
+
+observe((event, ctx) => {
+  if (event.type === 'run_end') {
+    metrics.record(event.durationMs, event.isError, { instanceId: ctx.id });
+  }
+});
+```
+
+Returns an unsubscribe function. The subscriber receives `(event: FlueEvent, ctx: FlueContext)` — use `ctx.id` for the agent instance id.
+
+### `admin()`
+
+Returns a read-only Hono sub-app exposing Flue's deployment inspection routes (list agents, list instances, list/replay runs). Mount it alongside `flue()` when you want to expose admin endpoints.
+
+```typescript
+import { flue, admin } from '@flue/runtime/app';
+import { Hono } from 'hono';
+
+const app = new Hono();
+app.route('/', flue());
+app.route('/admin', admin());
+export default app;
+```
